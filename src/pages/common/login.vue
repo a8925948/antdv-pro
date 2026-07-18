@@ -28,6 +28,7 @@ const codeLoading = shallowRef(false)
 const resetCounter = 60
 const submitLoading = shallowRef(false)
 const errorAlert = shallowRef(false)
+const loginErrorMessage = shallowRef('')
 const bubbleCanvas = ref<HTMLCanvasElement>()
 const { counter, pause, reset, resume, isActive } = useInterval(1000, {
   controls: true,
@@ -57,6 +58,8 @@ async function getCode() {
 
 async function submit() {
   submitLoading.value = true
+  errorAlert.value = false
+  loginErrorMessage.value = ''
   try {
     await formRef.value?.validate()
     let params: LoginParams | LoginMobileParams
@@ -89,12 +92,30 @@ async function submit() {
     })
   }
   catch (e) {
-    if (e instanceof AxiosError)
+    if (e instanceof AxiosError) {
+      const status = e.response?.status
+      const serverMessage = (e.response?.data as { msg?: string } | undefined)?.msg
+      if (!e.response)
+        loginErrorMessage.value = '无法连接登录服务，请检查网络后重试'
+      else if (status && status >= 500)
+        loginErrorMessage.value = serverMessage || '登录服务暂不可用，请稍后重试'
+      else
+        loginErrorMessage.value = serverMessage || t('pages.login.accountLogin.errorMessage')
       errorAlert.value = true
+    }
+    else {
+      loginErrorMessage.value = '登录失败，请稍后重试'
+      errorAlert.value = true
+    }
 
     submitLoading.value = false
   }
 }
+
+watch(() => loginModel.type, () => {
+  errorAlert.value = false
+  loginErrorMessage.value = ''
+})
 onMounted(async () => {
   await delayTimer(300)
   pageBubble.init(unref(bubbleCanvas)!)
@@ -118,10 +139,10 @@ onBeforeUnmount(() => {
         >
           <div class="flex-end">
             <span class="ant-pro-form-login-logo">
-              <img w-full h-full object-cover src="/logo.svg">
+              <img w-full h-full object-cover src="/logo.png">
             </span>
             <span class="ant-pro-form-login-title">
-              Antdv Pro
+              企业管理系统
             </span>
             <span class="ant-pro-form-login-desc">
               {{ t("pages.layouts.userLayout.title") }}
@@ -159,16 +180,15 @@ onBeforeUnmount(() => {
             <a-form ref="formRef" :model="loginModel">
               <a-tabs v-model:active-key="loginModel.type" centered>
                 <a-tab-pane key="account" :tab="t('pages.login.accountLogin.tab')" />
-                <a-tab-pane key="mobile" :tab="t('pages.login.phoneLogin.tab')" />
               </a-tabs>
               <!-- 判断是否存在error -->
               <a-alert
                 v-if="errorAlert && loginModel.type === 'account'" mb-24px
-                :message="t('pages.login.accountLogin.errorMessage')" type="error" show-icon
+                :message="loginErrorMessage || t('pages.login.accountLogin.errorMessage')" type="error" show-icon
               />
               <a-alert
                 v-if="errorAlert && loginModel.type === 'mobile'" mb-24px
-                :message="t('pages.login.phoneLogin.errorMessage')" type="error" show-icon
+                :message="loginErrorMessage || t('pages.login.phoneLogin.errorMessage')" type="error" show-icon
               />
               <template v-if="loginModel.type === 'account'">
                 <a-form-item name="username" :rules="[{ required: true, message: t('pages.login.username.required') }]">

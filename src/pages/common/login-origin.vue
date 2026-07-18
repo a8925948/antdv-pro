@@ -115,10 +115,10 @@ async function submit() {
         <div class="ant-pro-form-login-top">
           <div class="ant-pro-form-login-header">
             <span class="ant-pro-form-login-logo">
-              <img src="/logo.svg">
+              <img src="/logo.png">
             </span>
             <span class="ant-pro-form-login-title">
-              Antdv Pro
+              企业管理系统
             </span>
           </div>
           <div class="ant-pro-form-login-desc">
