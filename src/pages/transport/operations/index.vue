@@ -8,6 +8,7 @@ import dayjs from 'dayjs'
 import * as XLSX from 'xlsx'
 import { getApprovalInstancesApi } from '~@/api/approval'
 import { getRegulatoryFeeListApi } from '~@/api/transport/fees'
+import BusinessDetailDrawer from '~@/components/business-detail-drawer/index.vue'
 import SummaryCards from '~@/components/summary-cards/index.vue'
 import { createFinancialMonthOptions, createOccurredFinancialYearOptions, useFinancialPeriodFilter } from '~@/composables/financial-period-filter'
 import {
@@ -24,6 +25,7 @@ import {
   transportVehicleLoanRows,
 } from '~@/composables/transport-operation-data'
 import { createBusinessTableScrollX } from '~@/utils/business-table'
+import { createFinancialComparison } from '~@/utils/financial-comparison'
 import { getCurrentFinancialMonthRange, getFinancialMonthByDate, parseFinancialMonthKey } from '~@/utils/financialPeriod'
 import { calculateTransportFreightExcludingTax, matchesOperationPeriod, matchesOperationQuery, normalizeOperationPlateNo, operationAggregationKey } from '~@/utils/transport-operation'
 
@@ -38,7 +40,8 @@ interface VehicleOperationRecord {
   orderCount: number
   totalFreight: number
   taxedFreight: number
-  fuelQuantity: number
+  fuelQuantityLiters: number
+  fuelQuantityKg: number
   fuelFee: number
   maintenanceFee: number
   etcFee: number
@@ -75,6 +78,7 @@ interface VehicleFeeLine {
   driver: string
   feeType: OperationFeeType
   quantity?: number
+  quantityUnit?: 'L' | 'kg'
   amount: number
   source: string
 }
@@ -98,6 +102,8 @@ const route = useRoute()
 const detailOpen = ref(false)
 const detailRecord = ref<VehicleOperationRecord>()
 const detailFocusField = ref('')
+const costDetailOpen = ref(false)
+const selectedCostType = ref<OperationFeeType>()
 const currentFinancialPeriod = getCurrentFinancialMonthRange()
 const initialFinancialYear = Number(route.query.financialYear) || Number(currentFinancialPeriod.key.slice(0, 4))
 const initialFinancialMonth = Number(route.query.financialMonth) || Number(currentFinancialPeriod.key.slice(4, 6))
@@ -108,6 +114,18 @@ const approvalInstances = ref<ApprovalInstance[]>([])
 const queryModel = reactive({
   plateNo: '',
   driver: '',
+})
+const appliedQuery = reactive({
+  plateNo: '',
+  driver: '',
+})
+const tablePagination = reactive({
+  current: 1,
+  pageSize: 20,
+  pageSizeOptions: ['10', '20', '50', '100'],
+  showSizeChanger: true,
+  showQuickJumper: true,
+  showTotal: (total: number) => `共 ${total} 辆车`,
 })
 const approvalBusinessKeySet = computed(() => new Set(approvalInstances.value.map(instance => `${instance.businessType}:${instance.businessId}`)))
 
@@ -131,6 +149,21 @@ const orderLines = computed<TransportOrderLine[]>(() => transportOrderRows.value
   })
   .filter(row => row.code && row.date && row.plateNo))
 
+const driverByPlateNo = computed(() => {
+  const map = new Map<string, string>()
+  transportMaintenanceRows.value.forEach((row) => {
+    const key = normalizePlateNo(row.plateNo)
+    if (key && row.driver)
+      map.set(key, row.driver)
+  })
+  orderLines.value.forEach((row) => {
+    const key = normalizePlateNo(row.plateNo)
+    if (key && row.driver)
+      map.set(key, row.driver)
+  })
+  return map
+})
+
 const feeLines = computed<VehicleFeeLine[]>(() => [
   ...transportFuelRows.value.map((row) => {
     const range = getFinancialMonthByDate(row.date)
@@ -143,6 +176,7 @@ const feeLines = computed<VehicleFeeLine[]>(() => [
       driver: row.driver,
       feeType: '燃油费' as const,
       quantity: toNumber(row.quantity),
+      quantityUnit: row.quantityUnit || (/kg|公斤/i.test(row.quantity) ? 'kg' : 'L'),
       amount: toNumber(row.amount),
       source: '加油明细',
     }
@@ -288,12 +322,23 @@ function normalizePlateNo(value: unknown) {
   return normalizeOperationPlateNo(value)
 }
 
-const baseVehicleMap = computed(() => new Map(transportBaseVehicleRows.value
-  .map((row) => {
-    const plateNo = String(row.code || row.plateNo || '').trim()
-    return [normalizePlateNo(plateNo), { plateNo, trailerNo: String(row.trailerNo || '').trim() }] as const
+const baseVehicleMap = computed(() => {
+  const vehicles = new Map<string, { plateNo: string, trailerNo: string }>()
+  transportBaseVehicleRows.value.forEach((row) => {
+    const plateNo = String(row.plateNo || row.code || '').trim()
+    const key = normalizePlateNo(plateNo)
+    if (key)
+      vehicles.set(key, { plateNo, trailerNo: String(row.trailerNo || '').trim() })
   })
-  .filter(([key]) => Boolean(key))))
+  // 兼容旧数据：基础车辆未建档时，运营汇总仍保留已录入订单的真实车牌。
+  transportOrderRows.value.forEach((row) => {
+    const plateNo = String(row.plateNo || '').trim()
+    const key = normalizePlateNo(plateNo)
+    if (key && !vehicles.has(key))
+      vehicles.set(key, { plateNo, trailerNo: String(row.trailerNo || '').trim() })
+  })
+  return vehicles
+})
 
 const operationRows = computed<VehicleOperationRecord[]>(() => {
   const builtRows = buildOperationRows(orderLines.value, feeLines.value, approvalLines.value)
@@ -320,7 +365,8 @@ const operationRows = computed<VehicleOperationRecord[]>(() => {
       orderCount: 0,
       totalFreight: 0,
       taxedFreight: 0,
-      fuelQuantity: 0,
+      fuelQuantityLiters: 0,
+      fuelQuantityKg: 0,
       fuelFee: 0,
       maintenanceFee: 0,
       etcFee: 0,
@@ -353,9 +399,9 @@ function updateOperationDateRange(value?: [string, string] | [Dayjs, Dayjs] | nu
   ]
 }
 
-const filteredRows = computed(() => {
+function aggregateOperationRows(rows: VehicleOperationRecord[]) {
   const grouped = new Map<string, VehicleOperationRecord>()
-  operationRows.value.filter(row => matchesCurrentQuery(row)).forEach((row) => {
+  rows.forEach((row) => {
     const key = normalizePlateNo(row.plateNo)
     const existing = grouped.get(key)
     if (!existing) {
@@ -365,7 +411,8 @@ const filteredRows = computed(() => {
     existing.orderCount += row.orderCount
     existing.totalFreight += row.totalFreight
     existing.taxedFreight += row.taxedFreight
-    existing.fuelQuantity += row.fuelQuantity
+    existing.fuelQuantityLiters += row.fuelQuantityLiters
+    existing.fuelQuantityKg += row.fuelQuantityKg
     existing.fuelFee += row.fuelFee
     existing.maintenanceFee += row.maintenanceFee
     existing.etcFee += row.etcFee
@@ -384,6 +431,20 @@ const filteredRows = computed(() => {
       existing.driver = row.driver
   })
   return [...grouped.values()]
+}
+
+const filteredRows = computed(() => aggregateOperationRows(operationRows.value.filter(row => matchesCurrentQuery(row))))
+
+const previousMonthRows = computed(() => {
+  const currentKey = financialFilter.financialYear && financialFilter.financialMonth
+    ? `${financialFilter.financialYear}-${String(financialFilter.financialMonth).padStart(2, '0')}-01`
+    : `${currentFinancialPeriod.key.slice(0, 4)}-${currentFinancialPeriod.key.slice(4, 6)}-01`
+  const previous = dayjs(currentKey).subtract(1, 'month')
+  return aggregateOperationRows(operationRows.value.filter(row =>
+    row.financialYear === previous.year()
+    && row.financialMonth === previous.month() + 1
+    && matchesOperationQuery(row, { plateNo: appliedQuery.plateNo, driver: appliedQuery.driver }),
+  ))
 })
 
 const operationSummary = computed(() => {
@@ -394,7 +455,8 @@ const operationSummary = computed(() => {
     orderCount: sum(rows, 'orderCount'),
     totalFreight: sum(rows, 'totalFreight'),
     taxedFreight,
-    fuelQuantity: sum(rows, 'fuelQuantity'),
+    fuelQuantityLiters: sum(rows, 'fuelQuantityLiters'),
+    fuelQuantityKg: sum(rows, 'fuelQuantityKg'),
     fuelFee: sum(rows, 'fuelFee'),
     maintenanceFee: sum(rows, 'maintenanceFee'),
     etcFee: sum(rows, 'etcFee'),
@@ -412,15 +474,28 @@ const summaryCards = computed<SummaryCardItem[]>(() => {
   const cost = sumCosts(filteredRows.value)
   const freight = sum(filteredRows.value, 'totalFreight')
   const taxed = sum(filteredRows.value, 'taxedFreight')
+  const previousCost = sumCosts(previousMonthRows.value)
+  const previousFreight = sum(previousMonthRows.value, 'totalFreight')
+  const previousTaxed = sum(previousMonthRows.value, 'taxedFreight')
+  const vehicleCount = new Set(filteredRows.value.filter(row => row.orderCount || vehicleCost(row)).map(row => row.plateNo)).size
+  const previousVehicleCount = new Set(previousMonthRows.value.filter(row => row.orderCount || vehicleCost(row)).map(row => row.plateNo)).size
+  const orderCount = sum(filteredRows.value, 'orderCount')
+  const previousOrderCount = sum(previousMonthRows.value, 'orderCount')
+  const profit = taxed - cost
+  const previousProfit = previousTaxed - previousCost
+  const approved = sum(filteredRows.value, 'approvedAmount')
+  const previousApproved = sum(previousMonthRows.value, 'approvedAmount')
+  const used = sum(filteredRows.value, 'usedAmount')
+  const previousUsed = sum(previousMonthRows.value, 'usedAmount')
   return [
-    { label: '车辆数', value: new Set(filteredRows.value.map(row => row.plateNo)).size, hint: '当前筛选范围', tone: 'primary' },
-    { label: '订单数', value: sum(filteredRows.value, 'orderCount'), hint: '运输订单聚合', tone: 'default' },
-    { label: '总运费', value: money(freight), hint: '订单运费合计', tone: 'success' },
-    { label: '税后运费', value: money(taxed), hint: '按税率折算', tone: 'success' },
-    { label: '总成本', value: money(cost), hint: '燃油/维保/ETC等', tone: 'danger' },
-    { label: '总利润', value: money(taxed - cost), hint: '税后运费-总成本', tone: taxed >= cost ? 'success' : 'danger' },
-    { label: '审批通过金额', value: money(sum(filteredRows.value, 'approvedAmount')), hint: '审批中心通过金额', tone: 'primary' },
-    { label: '已使用金额', value: money(sum(filteredRows.value, 'usedAmount')), hint: '费用已占用金额', tone: 'warning' },
+    { label: '运营车辆数', value: vehicleCount, comparison: createFinancialComparison(vehicleCount, previousVehicleCount, `${previousVehicleCount} 辆`), tone: 'primary' },
+    { label: '订单数', value: orderCount, comparison: createFinancialComparison(orderCount, previousOrderCount, `${previousOrderCount} 单`), tone: 'default' },
+    { label: '总运费', value: money(freight), comparison: createFinancialComparison(freight, previousFreight, money(previousFreight)), tone: 'success' },
+    { label: '税后运费', value: money(taxed), comparison: createFinancialComparison(taxed, previousTaxed, money(previousTaxed)), tone: 'success' },
+    { label: '总成本', value: money(cost), comparison: createFinancialComparison(cost, previousCost, money(previousCost)), tone: 'danger' },
+    { label: '总利润', value: money(profit), comparison: createFinancialComparison(profit, previousProfit, money(previousProfit)), tone: profit >= 0 ? 'success' : 'danger' },
+    { label: '审批通过金额', value: money(approved), comparison: createFinancialComparison(approved, previousApproved, money(previousApproved)), tone: 'primary' },
+    { label: '已使用金额', value: money(used), comparison: createFinancialComparison(used, previousUsed, money(previousUsed)), tone: 'warning' },
   ]
 })
 
@@ -488,13 +563,33 @@ const costStructureSummary = computed(() => {
   return { total, items, largest: items[0] }
 })
 
+const costTypeFieldMap: Record<OperationFeeType, keyof VehicleOperationRecord> = {
+  '燃油费': 'fuelFee',
+  '维保费': 'maintenanceFee',
+  'ETC费': 'etcFee',
+  '工资': 'salaryFee',
+  '规费': 'regulatoryFee',
+  '车贷': 'loanFee',
+  '管理费': 'managementFee',
+}
+
+const selectedCostVehicleRows = computed(() => {
+  if (!selectedCostType.value)
+    return []
+  const field = costTypeFieldMap[selectedCostType.value]
+  return filteredRows.value
+    .map(row => ({ ...row, selectedCostAmount: Number(row[field] || 0) }))
+    .filter(row => row.selectedCostAmount > 0)
+    .sort((a, b) => b.selectedCostAmount - a.selectedCostAmount)
+})
+
 const tableColumns = [
   { title: '序号', dataIndex: 'index', width: 72, fixed: 'left' as const, align: 'center' as const },
   { title: '车牌号', dataIndex: 'plateNo', width: 132, fixed: 'left' as const, sorter: (a: VehicleOperationRecord, b: VehicleOperationRecord) => a.plateNo.localeCompare(b.plateNo), ellipsis: true },
   { title: '订单数', dataIndex: 'orderCount', width: 96, align: 'right' as const, sorter: (a: VehicleOperationRecord, b: VehicleOperationRecord) => a.orderCount - b.orderCount },
   { title: '总运费', dataIndex: 'totalFreight', width: 128, align: 'right' as const, sorter: (a: VehicleOperationRecord, b: VehicleOperationRecord) => a.totalFreight - b.totalFreight },
   { title: '税后运费', dataIndex: 'taxedFreight', width: 128, align: 'right' as const, sorter: (a: VehicleOperationRecord, b: VehicleOperationRecord) => a.taxedFreight - b.taxedFreight, defaultSortOrder: 'descend' as const },
-  { title: '油料数量', dataIndex: 'fuelQuantity', width: 116, align: 'right' as const, sorter: (a: VehicleOperationRecord, b: VehicleOperationRecord) => a.fuelQuantity - b.fuelQuantity },
+  { title: '油料数量', dataIndex: 'fuelQuantity', width: 150, align: 'right' as const, sorter: (a: VehicleOperationRecord, b: VehicleOperationRecord) => (a.fuelQuantityLiters - b.fuelQuantityLiters) || (a.fuelQuantityKg - b.fuelQuantityKg) },
   { title: '油料总价', dataIndex: 'fuelFee', width: 116, align: 'right' as const, sorter: (a: VehicleOperationRecord, b: VehicleOperationRecord) => a.fuelFee - b.fuelFee },
   { title: '维保费', dataIndex: 'maintenanceFee', width: 116, align: 'right' as const, sorter: (a: VehicleOperationRecord, b: VehicleOperationRecord) => a.maintenanceFee - b.maintenanceFee },
   { title: 'ETC费', dataIndex: 'etcFee', width: 116, align: 'right' as const, sorter: (a: VehicleOperationRecord, b: VehicleOperationRecord) => a.etcFee - b.etcFee },
@@ -549,7 +644,8 @@ function buildOperationRows(orders: TransportOrderLine[], fees: VehicleFeeLine[]
         orderCount: 0,
         totalFreight: 0,
         taxedFreight: 0,
-        fuelQuantity: 0,
+        fuelQuantityLiters: 0,
+        fuelQuantityKg: 0,
         fuelFee: 0,
         maintenanceFee: 0,
         etcFee: 0,
@@ -580,7 +676,10 @@ function buildOperationRows(orders: TransportOrderLine[], fees: VehicleFeeLine[]
   fees.forEach((fee) => {
     const row = ensureRow(fee.financialYear, fee.financialMonth, fee.plateNo, fee.driver, fee.date)
     if (fee.feeType === '燃油费') {
-      row.fuelQuantity += Number(fee.quantity || 0)
+      if (fee.quantityUnit === 'kg')
+        row.fuelQuantityKg += Number(fee.quantity || 0)
+      else
+        row.fuelQuantityLiters += Number(fee.quantity || 0)
       row.fuelFee += fee.amount
     }
     else if (fee.feeType === '维保费') {
@@ -645,13 +744,21 @@ function money(value: unknown) {
   return `¥${Number(value ?? 0).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
 }
 
+function formatFuelQuantity(liters: unknown, kilograms: unknown) {
+  const values = [
+    Number(liters || 0) ? `${Number(liters).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}L` : '',
+    Number(kilograms || 0) ? `${Number(kilograms).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}kg` : '',
+  ].filter(Boolean)
+  return values.join(' / ') || '0.00L'
+}
+
 function displayCell(row: VehicleOperationRecord, dataIndex: string, index: number) {
   if (dataIndex === 'index')
     return index + 1
   if (dataIndex === 'unusedAmount')
     return money(unusedAmount(row))
   if (dataIndex === 'fuelQuantity')
-    return `${Number(row.fuelQuantity || 0).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}L`
+    return formatFuelQuantity(row.fuelQuantityLiters, row.fuelQuantityKg)
   if (dataIndex === 'totalCost')
     return money(vehicleCost(row))
   if (dataIndex === 'profit')
@@ -727,6 +834,14 @@ function renderRevenueCostChart() {
         formatter: datum => ({ name: datum.type, value: `¥${Number(datum.amount).toFixed(2)}万` }),
       },
     })
+    revenueCostChart.value.on('element:click', (event: any) => {
+      const datum = event?.data?.data as { plateNo?: string, type?: string } | undefined
+      const record = filteredRows.value.find(row => row.plateNo === datum?.plateNo)
+      if (!record)
+        return
+      const focusField = datum?.type === '收入' ? 'taxedFreight' : datum?.type === '成本' ? 'totalCost' : 'profit'
+      openDetail(record, focusField)
+    })
     revenueCostChart.value.render()
     return
   }
@@ -762,6 +877,11 @@ function renderCostStructureChart() {
         }),
       },
     })
+    costStructureChart.value.on('element:click', (event: any) => {
+      const type = event?.data?.data?.type as OperationFeeType | undefined
+      if (type)
+        openCostDetail(type)
+    })
     costStructureChart.value.render()
     return
   }
@@ -780,7 +900,7 @@ function renderCharts() {
 
 async function ensureOperationDataLoaded() {
   for (let attempt = 0; attempt < 3; attempt += 1) {
-    await loadTransportOperationData({ force: attempt === 0 })
+    await loadTransportOperationData()
     if (transportOperationHydrated.value)
       break
     if (attempt < 2)
@@ -805,7 +925,7 @@ async function loadRegulatoryFees() {
 
 async function loadApprovalInstances() {
   const businessTypes = new Set(['transport_fuel', 'transport_etc', 'transport_maintenance', 'transport_fee', 'vehicle_loan', 'salary'])
-  const res = await getApprovalInstancesApi()
+  const res = await getApprovalInstancesApi({ status: 'APPROVED' })
   approvalInstances.value = (res.data ?? []).filter(instance => businessTypes.has(instance.businessType))
 }
 
@@ -816,9 +936,7 @@ function toNumber(value: unknown) {
 }
 
 function resolveDriver(plateNo: string) {
-  return orderLines.value.find(row => row.plateNo === plateNo)?.driver
-    || transportMaintenanceRows.value.find(row => row.plateNo === plateNo)?.driver
-    || ''
+  return driverByPlateNo.value.get(normalizePlateNo(plateNo)) || ''
 }
 
 function resolvePayrollPlateNo(row: { plateNo?: string, plateNos?: string, owner?: string }) {
@@ -945,13 +1063,38 @@ function buildLoanApprovals() {
 function resetQuery() {
   queryModel.plateNo = ''
   queryModel.driver = ''
+  appliedQuery.plateNo = ''
+  appliedQuery.driver = ''
+  tablePagination.current = 1
   resetFinancialPeriodFilter({ financialYear: initialFinancialYear, financialMonth: initialFinancialMonth })
+}
+
+function handleQuery() {
+  appliedQuery.plateNo = queryModel.plateNo.trim()
+  appliedQuery.driver = queryModel.driver.trim()
+  tablePagination.current = 1
+}
+
+function handleTableChange(pagination: { current?: number, pageSize?: number }) {
+  tablePagination.current = Number(pagination.current || 1)
+  tablePagination.pageSize = Number(pagination.pageSize || tablePagination.pageSize)
 }
 
 function openDetail(record: VehicleOperationRecord, focusField = '') {
   detailRecord.value = record
   detailFocusField.value = focusField
   detailOpen.value = true
+}
+
+function openCostDetail(type: OperationFeeType) {
+  selectedCostType.value = type
+  costDetailOpen.value = true
+}
+
+function openCostVehicleDetail(record: VehicleOperationRecord) {
+  const type = selectedCostType.value
+  costDetailOpen.value = false
+  openDetail(record, type ? String(costTypeFieldMap[type]) : 'totalCost')
 }
 
 function matchesRecordPeriod(row: { financialYear: number, financialMonth: number, plateNo: string, driver: string }, record: VehicleOperationRecord) {
@@ -987,10 +1130,16 @@ function getDetailFocusFeeType(field: string): OperationFeeType | undefined {
 function matchesCurrentQuery(row: { date: string, financialYear: number, financialMonth: number, plateNo: string, driver: string }) {
   return matchesOperationQuery(row, {
     ...financialFilter,
-    plateNo: queryModel.plateNo,
-    driver: queryModel.driver,
+    plateNo: appliedQuery.plateNo,
+    driver: appliedQuery.driver,
   })
 }
+
+watch(filteredRows, (rows) => {
+  const maxPage = Math.max(1, Math.ceil(rows.length / tablePagination.pageSize))
+  if (tablePagination.current > maxPage)
+    tablePagination.current = maxPage
+})
 
 onMounted(() => {
   void ensureOperationDataLoaded()
@@ -1032,6 +1181,7 @@ function mapApprovalBusinessType(businessType: string): ApprovalFeeType | undefi
 }
 
 function exportRows() {
+  handleQuery()
   const rows = filteredRows.value.map((row, index) => ({
     序号: index + 1,
     车牌号: row.plateNo,
@@ -1042,7 +1192,8 @@ function exportRows() {
     订单数: row.orderCount,
     总运费: row.totalFreight.toFixed(2),
     税后运费: row.taxedFreight.toFixed(2),
-    油料数量: row.fuelQuantity.toFixed(2),
+    油料数量_L: row.fuelQuantityLiters.toFixed(2),
+    油料数量_kg: row.fuelQuantityKg.toFixed(2),
     油料总价: row.fuelFee.toFixed(2),
     维保费: row.maintenanceFee.toFixed(2),
     ETC费: row.etcFee.toFixed(2),
@@ -1070,13 +1221,13 @@ function exportRows() {
 </script>
 
 <template>
-  <page-container title="运营数据" sub-title="运输管理 / 运营数据" description="按财务年、财务月、日期和车辆汇总运输订单、车辆费用、审批通过金额、已使用金额和利润。">
+  <page-container>
     <a-alert v-if="transportOperationError" class="operation-card" type="error" show-icon :message="transportOperationError" />
 
-    <SummaryCards :cards="summaryCards" :xl-span="6" compact :loading="transportOperationLoading" />
+    <SummaryCards :cards="summaryCards" :xl-span="6" compact :loading="transportOperationLoading" :data-state="filteredRows.length ? 'ready' : 'empty'" />
 
     <a-card class="operation-card" :bordered="false">
-      <a-form :model="queryModel" class="operation-query">
+      <a-form :model="queryModel" class="operation-query" @finish="handleQuery">
         <a-row :gutter="[16, 12]">
           <a-col :xs="24" :md="8" :xl="5">
             <a-form-item label="车牌号">
@@ -1090,7 +1241,7 @@ function exportRows() {
           </a-col>
           <a-col :xs="24" :xl="14" class="query-actions">
             <a-space>
-              <a-button type="primary">
+              <a-button type="primary" html-type="submit">
                 查询
               </a-button>
               <a-button @click="resetQuery">
@@ -1141,7 +1292,7 @@ function exportRows() {
                 <div class="profit-ranking-row profit-ranking-head" role="row">
                   <span>排名</span><span>车号</span><span>收入</span><span>成本</span><span>利润</span>
                 </div>
-                <div v-for="(row, index) in profitRankingRows" :key="`${row.rankGroup}-${row.plateNo}`" class="profit-ranking-row" :class="row.rankGroup === '利润前5' ? 'profit-ranking-row--high' : 'profit-ranking-row--low'" role="row">
+                <button v-for="(row, index) in profitRankingRows" :key="`${row.rankGroup}-${row.plateNo}`" type="button" class="profit-ranking-row profit-ranking-button" :class="row.rankGroup === '利润前5' ? 'profit-ranking-row--high' : 'profit-ranking-row--low'" role="row" :aria-label="`查看${row.plateNo}经营明细`" @click="openDetail(row, 'profit')">
                   <span :class="row.rankGroup === '利润前5' ? 'rank-high' : 'rank-low'">
                     <b>{{ row.rankGroup === '利润前5' ? index + 1 : index - 4 }}</b>{{ row.rankGroup === '利润前5' ? '前五' : '后五' }}
                   </span>
@@ -1149,7 +1300,7 @@ function exportRows() {
                   <span>{{ money(row.taxedFreight) }}</span>
                   <span>{{ money(row.cost) }}</span>
                   <span :class="row.profit >= 0 ? 'amount-profit' : 'amount-loss'">{{ money(row.profit) }}</span>
-                </div>
+                </button>
               </div>
             </div>
           </div>
@@ -1176,14 +1327,14 @@ function exportRows() {
                 <b>{{ costStructureSummary.largest ? `${(costStructureSummary.largest.share * 100).toFixed(1)}%` : '0.0%' }}</b>
               </div>
               <div class="cost-breakdown-list">
-                <div v-for="item in costStructureSummary.items" :key="item.type" class="cost-breakdown-row">
+                <button v-for="item in costStructureSummary.items" :key="item.type" type="button" class="cost-breakdown-row cost-breakdown-button" :aria-label="`查看${item.type}车辆明细`" @click="openCostDetail(item.type as OperationFeeType)">
                   <span class="cost-rank">{{ item.rank }}</span>
                   <div class="cost-name-share">
                     <div><strong>{{ item.type }}</strong><span>{{ (item.share * 100).toFixed(1) }}%</span></div>
                     <i><b :style="{ width: `${item.share * 100}%` }" /></i>
                   </div>
                   <strong>¥{{ item.amount.toFixed(2) }}万</strong>
-                </div>
+                </button>
               </div>
             </div>
           </div>
@@ -1204,7 +1355,15 @@ function exportRows() {
           </a-tag>
         </div>
       </template>
-      <a-table row-key="id" :loading="transportOperationLoading" :columns="tableColumns" :data-source="filteredRows" :scroll="{ x: tableScrollX }" :pagination="false">
+      <a-table
+        row-key="id"
+        :loading="transportOperationLoading"
+        :columns="tableColumns"
+        :data-source="filteredRows"
+        :scroll="{ x: tableScrollX }"
+        :pagination="tablePagination"
+        @change="handleTableChange"
+      >
         <template #headerCell="{ column }">
           <template v-if="isModuleLinkedColumn(column.dataIndex)">
             <a-tooltip :title="`${column.title}关联${getOperationColumnModule(column.dataIndex)}模块`">
@@ -1263,7 +1422,7 @@ function exportRows() {
                 {{ money(operationSummary.taxedFreight) }}
               </a-table-summary-cell>
               <a-table-summary-cell :index="5">
-                {{ operationSummary.fuelQuantity.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) }}L
+                {{ formatFuelQuantity(operationSummary.fuelQuantityLiters, operationSummary.fuelQuantityKg) }}
               </a-table-summary-cell>
               <a-table-summary-cell :index="6">
                 {{ money(operationSummary.fuelFee) }}
@@ -1302,7 +1461,14 @@ function exportRows() {
       </a-table>
     </a-card>
 
-    <a-modal v-model:open="detailOpen" title="车辆运营详情" width="820px" :footer="null">
+    <BusinessDetailDrawer
+      v-model:open="detailOpen"
+      :title="detailRecord ? `${detailRecord.plateNo} 运营详情` : '车辆运营详情'"
+      :subtitle="detailRecord ? `${detailRecord.financialYear}年${detailRecord.financialMonth}月 · ${detailRecord.driver || '未关联司机'}` : ''"
+      :status="detailRecord ? (vehicleProfit(detailRecord) >= 0 ? '盈利' : '亏损') : ''"
+      :status-color="detailRecord && vehicleProfit(detailRecord) >= 0 ? 'success' : 'error'"
+      :width="900"
+    >
       <template v-if="detailRecord">
         <a-descriptions bordered :column="2" size="small">
           <a-descriptions-item label="车牌号">
@@ -1397,13 +1563,13 @@ function exportRows() {
             { title: '日期', dataIndex: 'date' },
             { title: '费用类型', dataIndex: 'feeType' },
             { title: '来源模块', dataIndex: 'source' },
-            { title: '油量(L)', dataIndex: 'quantity' },
+            { title: '油量', dataIndex: 'quantity' },
             { title: '金额', dataIndex: 'amount' },
           ]"
         >
           <template #bodyCell="{ column, record }">
             <template v-if="column.dataIndex === 'quantity'">
-              {{ record.quantity ? `${Number(record.quantity).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}L` : '-' }}
+              {{ record.quantity ? `${Number(record.quantity).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}${record.quantityUnit || 'L'}` : '-' }}
             </template>
             <template v-else-if="column.dataIndex === 'amount'">
               {{ money(record.amount) }}
@@ -1471,7 +1637,30 @@ function exportRows() {
           </a-col>
         </a-row>
       </template>
-    </a-modal>
+      <template #footer>
+        <a-button @click="detailOpen = false">
+          关闭
+        </a-button>
+      </template>
+    </BusinessDetailDrawer>
+
+    <a-drawer v-model:open="costDetailOpen" :title="selectedCostType ? `${selectedCostType}车辆明细` : '成本明细'" width="720">
+      <a-alert mb-4 type="info" show-icon :message="`当前筛选范围内共 ${selectedCostVehicleRows.length} 辆车产生${selectedCostType || ''}`" description="按金额从高到低排列，点击任意车辆可继续查看原始费用明细。" />
+      <a-table :data-source="selectedCostVehicleRows" row-key="id" size="middle" :pagination="{ pageSize: 10, showSizeChanger: false }">
+        <a-table-column title="车牌号" data-index="plateNo" width="150" />
+        <a-table-column title="司机" data-index="driver" />
+        <a-table-column title="金额" data-index="selectedCostAmount" align="right" width="160">
+          <template #default="{ record }">
+            <strong>{{ money(record.selectedCostAmount) }}</strong>
+          </template>
+        </a-table-column>
+        <a-table-column title="操作" align="center" width="90">
+          <template #default="{ record }">
+            <a @click="openCostVehicleDetail(asVehicleOperationRecord(record))">查看明细</a>
+          </template>
+        </a-table-column>
+      </a-table>
+    </a-drawer>
   </page-container>
 </template>
 
@@ -1623,6 +1812,26 @@ function exportRows() {
   background: rgb(220 38 38 / 2.5%);
 }
 
+.profit-ranking-button,
+.cost-breakdown-button {
+  width: 100%;
+  padding: 0;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  border: 0;
+}
+
+.profit-ranking-button:hover,
+.profit-ranking-button:focus-visible,
+.cost-breakdown-button:hover,
+.cost-breakdown-button:focus-visible {
+  background: #f0f6ff;
+  outline: 2px solid #91caff;
+  outline-offset: -2px;
+}
+
 .profit-ranking-head {
   min-height: 34px;
   color: #475569;
@@ -1732,6 +1941,8 @@ function exportRows() {
   gap: 10px;
   align-items: center;
   min-height: 38px;
+  background: transparent;
+  border-radius: 4px;
 
   > strong {
     color: #334155;

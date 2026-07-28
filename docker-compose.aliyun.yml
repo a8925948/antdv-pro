@@ -1,6 +1,6 @@
 services:
   edge:
-    image: nginx:1.27-alpine
+    image: docker.m.daocloud.io/library/nginx:1.27-alpine
     restart: unless-stopped
     depends_on:
       web:
@@ -64,7 +64,7 @@ services:
       - enterprise_net
 
   mysql:
-    image: mysql:8.4
+    image: docker.m.daocloud.io/library/mysql:8.4
     restart: unless-stopped
     environment:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?set MYSQL_ROOT_PASSWORD}
@@ -78,7 +78,7 @@ services:
       - --performance-schema=OFF
       - --innodb-buffer-pool-size=128M
       - --max-connections=80
-      - --binlog-expire-logs-seconds=86400
+      - --binlog-expire-logs-seconds=3600
     volumes:
       - mysql_data:/var/lib/mysql
       - ./deploy/mysql/init:/docker-entrypoint-initdb.d:ro
@@ -92,7 +92,7 @@ services:
       - enterprise_net
 
   redis:
-    image: redis:7-alpine
+    image: docker.m.daocloud.io/library/redis:7-alpine
     restart: unless-stopped
     command: sh -c "redis-server --appendonly yes --requirepass \"$${REDIS_PASSWORD}\""
     environment:

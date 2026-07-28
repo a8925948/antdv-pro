@@ -75,6 +75,7 @@ export interface OfficeVehicleInsurance extends PermissionAwareRecord {
   startDate: string
   endDate: string
   attachmentName?: string
+  attachmentUrl?: string
   status?: LicenseStatus
   remark?: string
 }
@@ -113,6 +114,7 @@ export interface OfficeVehicleQuery {
   plateNo?: string
   expenseType?: string
   licenseType?: string
+  insuranceType?: string
   reminderType?: string
   departmentName?: string
   status?: string
@@ -149,6 +151,22 @@ export interface OfficeVehicleDetail {
   logs: OfficeVehicleLog[]
 }
 
+export interface OfficeVehicleBatchSavePayload {
+  vehicle: Partial<OfficeVehicle>
+  expenses?: Array<Partial<OfficeVehicleExpense>>
+  licenses?: Array<Partial<OfficeVehicleLicense>>
+  insurances?: Array<Partial<OfficeVehicleInsurance>>
+  reminders?: Array<Partial<OfficeVehicleReminder>>
+}
+
+export interface OfficeVehicleBatchSaveResult {
+  vehicle: OfficeVehicle
+  expenses: OfficeVehicleExpense[]
+  licenses: OfficeVehicleLicense[]
+  insurances: OfficeVehicleInsurance[]
+  reminders: OfficeVehicleReminder[]
+}
+
 export function getOfficeVehicleSummaryApi(params?: OfficeVehicleQuery) {
   return usePost<OfficeVehicleSummary>('/office-vehicle/summary', params)
 }
@@ -159,6 +177,10 @@ export function getOfficeVehicleListApi(params?: OfficeVehicleQuery) {
 
 export function saveOfficeVehicleApi(data: Partial<OfficeVehicle>) {
   return usePost<OfficeVehicle>('/office-vehicle/vehicles/save', data)
+}
+
+export function saveOfficeVehicleBatchApi(data: OfficeVehicleBatchSavePayload) {
+  return usePost<OfficeVehicleBatchSaveResult>('/office-vehicle/batch-save', data)
 }
 
 export function getOfficeVehicleDetailApi(id: string) {

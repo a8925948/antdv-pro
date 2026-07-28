@@ -1,42 +1,41 @@
 <script setup lang="ts">
-import type { OfficeVehicle, OfficeVehicleDetail, OfficeVehicleExpense, OfficeVehicleInsurance, OfficeVehicleLicense, OfficeVehicleQuery, OfficeVehicleReminder, OfficeVehicleSummary } from '~@/api/office-vehicle'
+import type { OfficeVehicle, OfficeVehicleDetail, OfficeVehicleExpense, OfficeVehicleInsurance, OfficeVehicleLicense, OfficeVehicleQuery, OfficeVehicleSummary } from '~@/api/office-vehicle'
 import type { RecordActionItem } from '~@/components/record-actions/index.vue'
-import { UploadOutlined } from '@ant-design/icons-vue'
+import { PlusOutlined, UploadOutlined } from '@ant-design/icons-vue'
 import dayjs from 'dayjs'
 import {
   changeOfficeVehicleExpenseStatusApi,
   deleteOfficeVehicleApi,
   deleteOfficeVehicleExpenseApi,
   deleteOfficeVehicleLicenseApi,
-  deleteOfficeVehicleReminderApi,
   exportOfficeVehicleExpensesApi,
   getOfficeVehicleDetailApi,
   getOfficeVehicleExpenseListApi,
   getOfficeVehicleInsuranceListApi,
   getOfficeVehicleLicenseListApi,
   getOfficeVehicleListApi,
-  getOfficeVehicleReminderListApi,
   getOfficeVehicleSummaryApi,
-  handleOfficeVehicleReminderApi,
-
   saveOfficeVehicleApi,
   saveOfficeVehicleExpenseApi,
   saveOfficeVehicleInsuranceApi,
   saveOfficeVehicleLicenseApi,
-  saveOfficeVehicleReminderApi,
   submitOfficeVehicleExpenseApprovalApi,
 } from '~@/api/office-vehicle'
 import FinancialPeriodFilter from '~@/components/financial-period-filter/index.vue'
 import RecordActions from '~@/components/record-actions/index.vue'
+import { useBusinessDictionaries } from '~@/composables/business-dictionaries'
 import { useFinancialPeriodFilter } from '~@/composables/financial-period-filter'
 import { useRecordPermission } from '~@/composables/record-permission'
 import { createBusinessTableScrollX, displayBusinessTableValue, enhanceBusinessTableColumns, getBusinessTableValue } from '~@/utils/business-table'
 import { downloadWorkbook } from '~@/utils/xlsx-export'
+import OfficeVehicleBatchModal from './components/office-vehicle-batch-modal.vue'
 
-type SectionKey = 'vehicles' | 'expenses' | 'licenses' | 'insurances' | 'reminders'
-type ModalType = 'vehicle' | 'expense' | 'license' | 'insurance' | 'reminder'
+type SectionKey = 'vehicles' | 'expenses' | 'licenses' | 'insurances'
+type ModalType = 'vehicle' | 'expense' | 'license' | 'insurance'
+type ContentTab = 'vehicles' | 'expenses'
 
 const message = useMessage()
+const businessDictionaries = useBusinessDictionaries()
 const route = useRoute()
 const { canEditRecord, canDeleteRecord, canAuditRecord } = useRecordPermission()
 const loading = ref(false)
@@ -47,14 +46,16 @@ const vehicleRows = ref<OfficeVehicle[]>([])
 const expenseRows = ref<OfficeVehicleExpense[]>([])
 const licenseRows = ref<OfficeVehicleLicense[]>([])
 const insuranceRows = ref<OfficeVehicleInsurance[]>([])
-const reminderRows = ref<OfficeVehicleReminder[]>([])
 const summary = ref<OfficeVehicleSummary>()
 const detail = ref<OfficeVehicleDetail>()
 const detailOpen = ref(false)
 const editOpen = ref(false)
+const editSaving = ref(false)
+const batchOpen = ref(false)
+const batchVehicle = ref<OfficeVehicle>()
 const modalType = ref<ModalType>('vehicle')
+const activeContentTab = ref<ContentTab>('vehicles')
 const editing = ref<Record<string, any>>({})
-const detailSectionFilter = ref<'all' | SectionKey>('all')
 
 const pagination = reactive({ current: 1, pageSize: 10, total: 0 })
 const queryModel = reactive({
@@ -62,27 +63,18 @@ const queryModel = reactive({
   vehicleId: undefined as string | undefined,
   expenseType: undefined as string | undefined,
   licenseType: undefined as string | undefined,
-  reminderType: undefined as string | undefined,
+  insuranceType: undefined as string | undefined,
   departmentName: undefined as string | undefined,
   status: undefined as string | undefined,
 })
 
-const expenseTypes = ['加油费', '充电费', '维修费', '保养费', '保险费', '年检费', '停车费', '过路费', '洗车费', '违章罚款', '其他费用']
-const licenseTypes = ['行驶证', '车辆登记证', '营运证', '道路运输证', '驾驶证', '其他证照']
-const reminderTypes = ['车辆年审到期', '车辆保险到期', '车辆保养时间', '交强险到期', '商业险到期', '行驶证到期', '营运证到期', '道路运输证到期', '其他提醒']
-const paymentMethods = ['企业微信', '公务卡', '银行转账', '现金', '个人垫付']
+const expenseTypeOptions = computed(() => businessDictionaries.options('office_vehicle_expense_type'))
+const licenseTypeOptions = computed(() => businessDictionaries.options('office_vehicle_license_type'))
+const paymentMethodOptions = computed(() => businessDictionaries.options('office_vehicle_payment_method'))
 const vehicleStatuses = ['正常', '停用', '维修中', '已出售']
 const expenseStatuses = ['草稿', '待审批', '审批中', '已确认', '已驳回', '已撤回']
-const dueStatuses = ['正常', '即将到期', '已过期', '已处理']
+const dueStatuses = ['有效', '即将到期', '已过期']
 const attachmentAccept = 'image/*,.pdf,.doc,.docx,.xls,.xlsx,.txt,.csv'
-const createTypeOptions = [
-  { label: '车辆档案', value: 'vehicle' },
-  { label: '费用记录', value: 'expense' },
-  { label: '证照资料', value: 'license' },
-  { label: '保险信息', value: 'insurance' },
-  { label: '到期事项', value: 'reminder' },
-]
-
 const vehicleOptions = computed(() => vehicleRows.value.map(item => ({ label: `${item.plateNo} / ${item.brandModel}`, value: item.id! })))
 const availableMonthKeys = computed(() => [...new Set(expenseRows.value.map(item => dayjs(item.occurredDate).format('YYYYMM')))])
 
@@ -91,8 +83,8 @@ const summaryCards = computed(() => [
   { label: '本月费用', value: money(summary.value?.monthExpense), hint: '费用台账合计', tone: 'danger' },
   { label: '审批总金额', value: money(summary.value?.approvalTotalAmount), hint: '待审批/审批中/已确认', tone: 'primary' },
   { label: '使用金额', value: money(summary.value?.usedAmount), hint: '已确认计入运营数据', tone: 'success' },
-  { label: '即将到期提醒', value: summary.value?.upcomingReminderCount ?? 0, hint: '需及时处理', tag: '30天内', tone: 'warning' },
-  { label: '已过期提醒', value: summary.value?.expiredReminderCount ?? 0, hint: '证照/保险/保养', tone: 'danger' },
+  { label: '即将到期', value: summary.value?.upcomingReminderCount ?? 0, hint: '证照与保险', tag: '30天内', tone: 'warning' },
+  { label: '已过期', value: summary.value?.expiredReminderCount ?? 0, hint: '证照与保险', tone: 'danger' },
   { label: '已确认费用', value: money(summary.value?.confirmedExpense), hint: '财务可追溯', tone: 'success' },
   { label: '待审批费用', value: summary.value?.pendingExpenseCount ?? 0, hint: '已接入 OA 审批', tone: 'warning' },
 ])
@@ -135,134 +127,69 @@ const insuranceColumns = [
   { title: '状态', dataIndex: 'status', width: 110 },
   { title: '操作', dataIndex: 'action', fixed: 'right' as const, width: 150 },
 ]
-const reminderColumns = [
-  { title: '车辆', dataIndex: 'plateNo', width: 120 },
-  { title: '提醒类型', dataIndex: 'reminderType', width: 150 },
-  { title: '到期日期', dataIndex: 'dueDate', width: 120 },
-  { title: '提前天数', dataIndex: 'remindDays', width: 100 },
-  { title: '提醒对象', dataIndex: 'targetNames', width: 160 },
-  { title: '提醒状态', dataIndex: 'status', width: 110 },
-  { title: '是否处理', dataIndex: 'handled', width: 100 },
-  { title: '处理时间', dataIndex: 'handledAt', width: 160 },
-  { title: '处理备注', dataIndex: 'handleRemark', ellipsis: true },
-  { title: '操作', dataIndex: 'action', fixed: 'right' as const, width: 150 },
+const vehicleSummaryColumns = [
+  { title: '车辆', dataIndex: 'vehicleInfo', width: 190, fixed: 'left' as const },
+  { title: '归属信息', dataIndex: 'ownership', width: 170 },
+  { title: '证照', dataIndex: 'licenseOverview', width: 190 },
+  { title: '保险', dataIndex: 'insuranceOverview', width: 190 },
+  { title: '车辆状态', dataIndex: 'status', width: 100 },
+  { title: '操作', dataIndex: 'action', fixed: 'right' as const, width: 190 },
 ]
+const vehicleSummaryScrollX = computed(() => createBusinessTableScrollX(vehicleSummaryColumns, 1180))
 
-const officeDetailColumns = computed(() => enhanceBusinessTableColumns([
-  { title: '类型', dataIndex: 'sectionLabel', width: 100, fixed: 'left' as const },
-  { title: '车牌号', dataIndex: 'plateNo', width: 130, fixed: 'left' as const },
-  { title: '明细内容', dataIndex: 'itemName', width: 180 },
-  { title: '金额', dataIndex: 'amount', width: 120 },
-  { title: '业务日期/到期日', dataIndex: 'businessDate', width: 140 },
-  { title: '经办/负责人', dataIndex: 'ownerName', width: 130 },
-  { title: '所属部门', dataIndex: 'departmentName', width: 130 },
-  { title: '状态', dataIndex: 'status', width: 110 },
-  { title: '凭证/处理', dataIndex: 'attachmentName', width: 180, ellipsis: true },
-  { title: '备注', dataIndex: 'remark', ellipsis: true },
-  { title: '操作', dataIndex: 'action', fixed: 'right' as const, width: 180 },
-]))
-const officeDetailScrollX = computed(() => createBusinessTableScrollX(officeDetailColumns.value, 1500))
-const officeDetailRows = computed(() => [
-  ...vehicleRows.value.map(row => ({
-    id: `vehicle-${row.id}`,
-    section: 'vehicles' as SectionKey,
-    sectionLabel: '车辆',
-    plateNo: row.plateNo,
-    itemName: row.brandModel || row.vehicleType,
-    amount: row.monthExpense,
-    businessDate: row.purchaseDate || '-',
-    ownerName: row.ownerName || row.defaultDriverName || '-',
-    departmentName: row.departmentName,
-    status: row.status,
-    attachmentName: row.photoUrl || '-',
-    remark: row.remark || `到期风险 ${row.riskCount ?? 0} 项`,
-    raw: row,
-  })),
-  ...expenseRows.value.map(row => ({
-    id: `expense-${row.id}`,
-    section: 'expenses' as SectionKey,
-    sectionLabel: '费用',
-    plateNo: row.plateNo,
-    itemName: row.expenseType,
-    amount: row.amount,
-    businessDate: row.occurredDate,
-    ownerName: row.handlerName,
-    departmentName: row.departmentName,
-    status: row.approvalStatus,
-    attachmentName: row.attachmentName || row.invoiceNo || '-',
-    remark: row.remark || row.paymentMethod || '-',
-    raw: row,
-  })),
-  ...licenseRows.value.map(row => ({
-    id: `license-${row.id}`,
-    section: 'licenses' as SectionKey,
-    sectionLabel: '证照',
-    plateNo: row.plateNo,
-    itemName: row.licenseType,
-    amount: undefined,
-    businessDate: row.expiryDate || row.issueDate,
-    ownerName: row.issuingAuthority || '-',
-    departmentName: '-',
-    status: row.status,
-    attachmentName: row.attachmentName || row.licenseNo || '-',
-    remark: row.remark || '-',
-    raw: row,
-  })),
-  ...insuranceRows.value.map(row => ({
-    id: `insurance-${row.id}`,
-    section: 'insurances' as SectionKey,
-    sectionLabel: '保险',
-    plateNo: row.plateNo,
-    itemName: row.insuranceType,
-    amount: row.amount,
-    businessDate: row.endDate || row.startDate,
-    ownerName: row.insurer || '-',
-    departmentName: '-',
-    status: row.status,
-    attachmentName: row.attachmentName || row.policyNo || '-',
-    remark: row.remark || '-',
-    raw: row,
-  })),
-  ...reminderRows.value.map(row => ({
-    id: `reminder-${row.id}`,
-    section: 'reminders' as SectionKey,
-    sectionLabel: '到期事项',
-    plateNo: row.plateNo,
-    itemName: row.reminderType,
-    amount: undefined,
-    businessDate: row.dueDate,
-    ownerName: Array.isArray(row.targetNames) ? row.targetNames.join('、') : row.targetNames,
-    departmentName: '-',
-    status: row.status,
-    attachmentName: row.handled ? row.handledAt || '-' : '未处理',
-    remark: row.handleRemark || `提前 ${row.remindDays} 天提醒`,
-    raw: row,
-  })),
-])
-const filteredOfficeDetailRows = computed(() => detailSectionFilter.value === 'all'
-  ? officeDetailRows.value
-  : officeDetailRows.value.filter(row => row.section === detailSectionFilter.value))
-const detailFilterOptions = computed(() => [
-  { label: `全部 ${officeDetailRows.value.length}`, value: 'all' },
-  { label: `车辆 ${vehicleRows.value.length}`, value: 'vehicles' },
-  { label: `费用 ${expenseRows.value.length}`, value: 'expenses' },
-  { label: `证照 ${licenseRows.value.length}`, value: 'licenses' },
-  { label: `保险 ${insuranceRows.value.length}`, value: 'insurances' },
-  { label: `到期事项 ${reminderRows.value.length}`, value: 'reminders' },
-])
+const vehicleSummaryRows = computed(() => vehicleRows.value.map((vehicle) => {
+  const expenses = expenseRows.value.filter(item => item.vehicleId === vehicle.id)
+  const licenses = licenseRows.value.filter(item => item.vehicleId === vehicle.id)
+  const insurances = insuranceRows.value.filter(item => item.vehicleId === vehicle.id)
+  return {
+    ...vehicle,
+    expenses,
+    licenses,
+    insurances,
+    nearestLicense: [...licenses].filter(item => item.expiryDate).sort((a, b) => dayjs(a.expiryDate).valueOf() - dayjs(b.expiryDate).valueOf())[0],
+    nearestInsurance: [...insurances].filter(item => item.endDate).sort((a, b) => dayjs(a.endDate).valueOf() - dayjs(b.endDate).valueOf())[0],
+  }
+}))
 
-const detailExpenseColumns = computed(() => enhanceBusinessTableColumns(expenseColumns.filter(item => item.dataIndex !== 'action')))
-const detailLicenseColumns = computed(() => enhanceBusinessTableColumns(licenseColumns.filter(item => item.dataIndex !== 'action')))
-const detailInsuranceColumns = computed(() => enhanceBusinessTableColumns(insuranceColumns.filter(item => item.dataIndex !== 'action')))
-const detailReminderColumns = computed(() => enhanceBusinessTableColumns(reminderColumns.filter(item => item.dataIndex !== 'action')))
+const filteredVehicleSummaryRows = computed(() => vehicleSummaryRows.value.filter((row) => {
+  if (queryModel.expenseType && !row.expenses.some(item => item.expenseType === queryModel.expenseType))
+    return false
+  if (queryModel.licenseType && !row.licenses.some(item => item.licenseType === queryModel.licenseType))
+    return false
+  if (queryModel.insuranceType && !row.insurances.some(item => item.insuranceType === queryModel.insuranceType))
+    return false
+  if (queryModel.status) {
+    const matchesStatus = row.status === queryModel.status
+      || row.expenses.some(item => item.approvalStatus === queryModel.status)
+      || row.licenses.some(item => item.status === queryModel.status)
+      || row.insurances.some(item => item.status === queryModel.status)
+    if (!matchesStatus)
+      return false
+  }
+  return true
+}))
+
+const filteredExpenseRows = computed(() => expenseRows.value.filter((row) => {
+  if (queryModel.expenseType && row.expenseType !== queryModel.expenseType)
+    return false
+  if (queryModel.status && expenseStatuses.includes(queryModel.status) && row.approvalStatus !== queryModel.status)
+    return false
+  return true
+}))
+const filteredExpenseAmount = computed(() => filteredExpenseRows.value.reduce((total, row) => total + Number(row.amount || 0), 0))
+
+const detailExpenseColumns = computed(() => enhanceBusinessTableColumns(expenseColumns))
+const detailLicenseColumns = computed(() => enhanceBusinessTableColumns(licenseColumns))
+const detailInsuranceColumns = computed(() => enhanceBusinessTableColumns(insuranceColumns))
 const detailExpenseScrollX = computed(() => createBusinessTableScrollX(detailExpenseColumns.value, 1200))
 const detailLicenseScrollX = computed(() => createBusinessTableScrollX(detailLicenseColumns.value, 1100))
 const detailInsuranceScrollX = computed(() => createBusinessTableScrollX(detailInsuranceColumns.value, 1100))
-const detailReminderScrollX = computed(() => createBusinessTableScrollX(detailReminderColumns.value, 1100))
 
-onMounted(() => {
+onMounted(async () => {
+  await businessDictionaries.load()
   queryModel.plateNo = typeof route.query.plateNo === 'string' ? route.query.plateNo : ''
-  queryModel.reminderType = typeof route.query.reminderType === 'string' ? route.query.reminderType : undefined
+  queryModel.licenseType = typeof route.query.licenseType === 'string' ? route.query.licenseType : undefined
+  queryModel.insuranceType = typeof route.query.insuranceType === 'string' ? route.query.insuranceType : undefined
   loadAll()
 })
 
@@ -276,12 +203,16 @@ function buildQuery(): OfficeVehicleQuery {
     pageSize: pagination.pageSize,
     plateNo: queryModel.plateNo || undefined,
     vehicleId: queryModel.vehicleId,
-    expenseType: queryModel.expenseType,
-    licenseType: queryModel.licenseType,
-    reminderType: queryModel.reminderType,
     departmentName: queryModel.departmentName,
-    status: queryModel.status,
     ...queryParams.value,
+  }
+}
+
+function buildExpenseQuery(): OfficeVehicleQuery {
+  return {
+    ...buildQuery(),
+    expenseType: queryModel.expenseType,
+    status: expenseStatuses.includes(queryModel.status || '') ? queryModel.status : undefined,
   }
 }
 
@@ -305,26 +236,23 @@ async function loadList() {
   errorMessage.value = ''
   try {
     const query = { ...buildQuery(), current: 1, pageSize: 1000 }
-    const [summaryResult, vehicleResult, expenseResult, licenseResult, insuranceResult, reminderResult] = await Promise.all([
+    const [summaryResult, vehicleResult, expenseResult, licenseResult, insuranceResult] = await Promise.all([
       getOfficeVehicleSummaryApi(buildQuery()),
       getOfficeVehicleListApi(query),
-      getOfficeVehicleExpenseListApi(query),
-      getOfficeVehicleLicenseListApi(query),
-      getOfficeVehicleInsuranceListApi(query),
-      getOfficeVehicleReminderListApi(query),
+      getOfficeVehicleExpenseListApi({ ...buildExpenseQuery(), current: 1, pageSize: 1000 }),
+      getOfficeVehicleLicenseListApi({ ...query, licenseType: queryModel.licenseType }),
+      getOfficeVehicleInsuranceListApi({ ...query, insuranceType: queryModel.insuranceType }),
     ])
     summary.value = summaryResult.data
     vehicleRows.value = vehicleResult.data?.records || []
     expenseRows.value = expenseResult.data?.records || []
     licenseRows.value = licenseResult.data?.records || []
     insuranceRows.value = insuranceResult.data?.records || []
-    reminderRows.value = reminderResult.data?.records || []
     pagination.total = Math.max(
       vehicleResult.data?.total || 0,
       expenseResult.data?.total || 0,
       licenseResult.data?.total || 0,
       insuranceResult.data?.total || 0,
-      reminderResult.data?.total || 0,
     )
   }
   catch (error: any) {
@@ -341,7 +269,7 @@ function resetQuery() {
   queryModel.vehicleId = undefined
   queryModel.expenseType = undefined
   queryModel.licenseType = undefined
-  queryModel.reminderType = undefined
+  queryModel.insuranceType = undefined
   queryModel.departmentName = undefined
   queryModel.status = undefined
   resetFinancialPeriodFilter()
@@ -349,25 +277,22 @@ function resetQuery() {
   loadList()
 }
 
-function openCreate(type: ModalType) {
-  modalType.value = type
-  editing.value = defaultRecord(type)
-  editOpen.value = true
+function openBatchCreate() {
+  batchVehicle.value = undefined
+  batchOpen.value = true
 }
 
-function openCreateDetail() {
-  openCreate('vehicle')
-}
-
-function changeCreateType(value: string | number) {
-  const type = String(value) as ModalType
-  modalType.value = type
-  editing.value = defaultRecord(type)
+function openBatchForVehicle(vehicle: Record<string, any>) {
+  batchVehicle.value = vehicle as OfficeVehicle
+  batchOpen.value = true
 }
 
 function openEdit(type: ModalType, record: Record<string, any>) {
   modalType.value = type
-  editing.value = { ...record }
+  editing.value = {
+    ...record,
+    ...(type === 'insurance' && record.startDate && record.endDate ? { insuranceRange: [record.startDate, record.endDate] } : {}),
+  }
   editOpen.value = true
 }
 
@@ -377,20 +302,7 @@ function modalTypeLabel(type: ModalType) {
     expense: '费用',
     license: '证照',
     insurance: '保险',
-    reminder: '到期事项',
   }[type]
-}
-
-function defaultRecord(type: ModalType) {
-  if (type === 'vehicle')
-    return { vehicleType: '', status: '正常', departmentName: '', ownerName: '', photoUrl: '' }
-  if (type === 'expense')
-    return { vehicleId: vehicleRows.value[0]?.id, expenseType: undefined, amount: 0, occurredDate: dayjs().format('YYYY-MM-DD'), handlerName: '', departmentName: '', paymentMethod: undefined, needApproval: false, approvalStatus: '草稿' }
-  if (type === 'license')
-    return { vehicleId: vehicleRows.value[0]?.id, licenseType: undefined, issueDate: undefined, expiryDate: undefined, status: '有效' }
-  if (type === 'insurance')
-    return { vehicleId: vehicleRows.value[0]?.id, insuranceType: undefined, amount: 0, startDate: undefined, endDate: undefined, status: '有效' }
-  return { vehicleId: vehicleRows.value[0]?.id, reminderType: undefined, dueDate: undefined, remindDays: 30, targetNames: [] }
 }
 
 async function saveEdit() {
@@ -400,8 +312,30 @@ async function saveEdit() {
     expense: saveOfficeVehicleExpenseApi,
     license: saveOfficeVehicleLicenseApi,
     insurance: saveOfficeVehicleInsuranceApi,
-    reminder: saveOfficeVehicleReminderApi,
   }
+  const record = editing.value
+  if (modalType.value === 'vehicle') {
+    if (!String(record.plateNo || '').trim() || !String(record.brandModel || '').trim())
+      return message.warning('请填写车牌号和品牌型号')
+    if (vehicleRows.value.some(item => item.plateNo === String(record.plateNo).trim() && item.id !== record.id))
+      return message.warning('车牌号已存在，请检查后再保存')
+  }
+  if (modalType.value === 'expense' && (!record.vehicleId || !record.expenseType || Number(record.amount || 0) <= 0 || !record.occurredDate))
+    return message.warning('请选择车辆、费用类型、发生日期并填写大于 0 的金额')
+  if (modalType.value === 'license') {
+    if (!record.vehicleId || !record.licenseType || !String(record.licenseNo || '').trim() || !record.expiryDate)
+      return message.warning('请选择车辆、证照类型并填写证照编号和到期日期')
+    if (record.issueDate && dayjs(record.expiryDate).isBefore(dayjs(record.issueDate), 'day'))
+      return message.warning('证照到期日期不能早于发证日期')
+  }
+  if (modalType.value === 'insurance') {
+    if (!record.vehicleId || !String(record.insuranceType || '').trim() || !String(record.policyNo || '').trim() || Number(record.amount || 0) <= 0 || !record.startDate || !record.endDate)
+      return message.warning('请完整填写车辆、保险类型、保单号、保费和起止日期')
+    if (dayjs(record.endDate).isBefore(dayjs(record.startDate), 'day'))
+      return message.warning('保险到期日期不能早于开始日期')
+  }
+
+  editSaving.value = true
   try {
     const { code, msg } = await apiMap[modalType.value](editing.value as any)
     if (code !== 200)
@@ -409,14 +343,19 @@ async function saveEdit() {
     editOpen.value = false
     message.success('保存成功')
     await Promise.all([loadVehiclesForOptions(), loadList()])
+    if (detailOpen.value && detail.value?.vehicle.id)
+      await refreshDetail(detail.value.vehicle.id)
   }
   catch (error: any) {
     errorMessage.value = error?.message || '保存失败'
     message.error(errorMessage.value)
   }
+  finally {
+    editSaving.value = false
+  }
 }
 
-async function openDetail(record: OfficeVehicle) {
+async function openDetail(record: Record<string, any>) {
   if (!record.id)
     return
   try {
@@ -432,9 +371,15 @@ async function openDetail(record: OfficeVehicle) {
   }
 }
 
+async function refreshDetail(vehicleId: string) {
+  const { data, code } = await getOfficeVehicleDetailApi(vehicleId)
+  if (code === 200 && data)
+    detail.value = data
+}
+
 async function exportExpenses() {
   try {
-    const { data } = await exportOfficeVehicleExpensesApi(buildQuery())
+    const { data } = await exportOfficeVehicleExpensesApi(buildExpenseQuery())
     downloadWorkbook(`办公用车费用台账_${dayjs().format('YYYYMMDDHHmmss')}.xlsx`, [{ name: '费用台账', rows: data || [] }])
   }
   catch (error: any) {
@@ -453,31 +398,43 @@ function statusColor(status: string) {
   return 'blue'
 }
 
-function sectionColor(section: SectionKey) {
-  return {
-    vehicles: 'blue',
-    expenses: 'green',
-    licenses: 'cyan',
-    insurances: 'purple',
-    reminders: 'orange',
-  }[section]
+function openAttachment(record: { attachmentName?: string, attachmentUrl?: string }) {
+  const attachmentUrl = String(record.attachmentUrl || '').trim()
+  if (!attachmentUrl) {
+    message.warning(record.attachmentName ? '该历史附件缺少访问地址，请编辑记录后重新上传' : '暂无附件')
+    return
+  }
+
+  try {
+    const url = new URL(attachmentUrl, window.location.origin)
+    if (!['http:', 'https:'].includes(url.protocol))
+      throw new Error('unsupported protocol')
+    window.open(url.href, '_blank', 'noopener,noreferrer')
+  }
+  catch {
+    message.error('附件地址无效，请重新上传')
+  }
 }
 
-function displayCell(record: Record<string, any>, dataIndex: string) {
-  const value = record[dataIndex]
-  if (dataIndex === 'amount' && (value === undefined || value === null || value === ''))
-    return '-'
-  if (['amount', 'monthExpense'].includes(dataIndex))
-    return money(value)
-  if (Array.isArray(value))
-    return value.join('、')
-  if (typeof value === 'boolean')
-    return value ? '是' : '否'
-  return value || '-'
+async function runDelete(action: () => Promise<unknown>) {
+  try {
+    await action()
+    await loadList()
+    message.success('删除成功')
+  }
+  catch (error: any) {
+    const reason = error?.message || '删除失败'
+    errorMessage.value = reason
+    message.error(reason)
+  }
 }
 
-function columnKey(dataIndex: unknown) {
-  return Array.isArray(dataIndex) ? String(dataIndex[0] ?? '') : String(dataIndex ?? '')
+function canEditVehicle(record: Record<string, any>) {
+  return canEditRecord(record).allowed
+}
+
+function canDeleteVehicle(record: Record<string, any>) {
+  return canDeleteRecord(record).allowed
 }
 
 function buildActions(section: SectionKey, record: any): RecordActionItem[] {
@@ -487,6 +444,7 @@ function buildActions(section: SectionKey, record: any): RecordActionItem[] {
   if (section === 'vehicles') {
     return [
       { key: 'view', label: '查看', onClick: () => openDetail(record) },
+      { key: 'supplement', label: '补充资料', onClick: () => openBatchForVehicle(record) },
       { key: 'edit', label: '编辑', hidden: !canEdit.allowed, disabled: !canEdit.allowed, onClick: () => openEdit('vehicle', record) },
       {
         key: 'delete',
@@ -496,10 +454,7 @@ function buildActions(section: SectionKey, record: any): RecordActionItem[] {
         hidden: !canDelete.allowed,
         disabled: !canDelete.allowed,
         confirmTitle: '确定删除该车辆档案？',
-        onClick: async () => {
-          await deleteOfficeVehicleApi(record.id)
-          await loadList()
-        },
+        onClick: () => runDelete(() => deleteOfficeVehicleApi(record.id)),
       },
     ]
   }
@@ -536,7 +491,7 @@ function buildActions(section: SectionKey, record: any): RecordActionItem[] {
         },
       },
       { key: 'edit', label: '编辑', hidden: !canEdit.allowed, disabled: !canEdit.allowed, onClick: () => openEdit('expense', record) },
-      { key: 'preview', label: '预览票据', hidden: !record.attachmentName, onClick: () => { message.info(record.attachmentName) } },
+      { key: 'preview', label: '预览票据', hidden: !record.attachmentName, onClick: () => openAttachment(record) },
       {
         key: 'delete',
         label: '删除',
@@ -545,16 +500,13 @@ function buildActions(section: SectionKey, record: any): RecordActionItem[] {
         hidden: !canDelete.allowed,
         disabled: !canDelete.allowed,
         confirmTitle: '确定删除该费用记录？',
-        onClick: async () => {
-          await deleteOfficeVehicleExpenseApi(record.id)
-          await loadList()
-        },
+        onClick: () => runDelete(() => deleteOfficeVehicleExpenseApi(record.id)),
       },
     ]
   }
   if (section === 'licenses') {
     return [
-      { key: 'view', label: '查看', onClick: () => { message.info(record.attachmentName || '暂无附件') } },
+      { key: 'view', label: '查看', onClick: () => openAttachment(record) },
       { key: 'edit', label: '编辑', hidden: !canEdit.allowed, onClick: () => openEdit('license', record) },
       {
         key: 'delete',
@@ -563,44 +515,17 @@ function buildActions(section: SectionKey, record: any): RecordActionItem[] {
         confirm: true,
         hidden: !canDelete.allowed,
         confirmTitle: '确定删除该证照？',
-        onClick: async () => {
-          await deleteOfficeVehicleLicenseApi(record.id)
-          await loadList()
-        },
+        onClick: () => runDelete(() => deleteOfficeVehicleLicenseApi(record.id)),
       },
     ]
   }
   if (section === 'insurances') {
     return [
-      { key: 'view', label: '查看', onClick: () => { message.info(record.attachmentName || record.policyNo) } },
+      { key: 'view', label: '查看', onClick: () => openAttachment(record) },
       { key: 'edit', label: '编辑', hidden: !canEdit.allowed, onClick: () => openEdit('insurance', record) },
     ]
   }
-  return [
-    { key: 'view', label: '查看', onClick: () => { message.info(record.handleRemark || record.reminderType) } },
-    { key: 'edit', label: '编辑', hidden: record.handled || !canEdit.allowed, onClick: () => openEdit('reminder', record) },
-    {
-      key: 'handle',
-      label: '处理',
-      hidden: record.handled || !canAudit.allowed,
-      onClick: async () => {
-        await handleOfficeVehicleReminderApi(record.id, '页面处理完成')
-        await loadList()
-      },
-    },
-    {
-      key: 'delete',
-      label: '删除',
-      danger: true,
-      confirm: true,
-      hidden: !canDelete.allowed,
-      confirmTitle: '确定删除该到期事项？',
-      onClick: async () => {
-        await deleteOfficeVehicleReminderApi(record.id)
-        await loadList()
-      },
-    },
-  ]
+  return []
 }
 
 function selectAttachment(file: File, field: 'photoUrl' | 'attachmentName') {
@@ -652,8 +577,9 @@ async function uploadAttachment(file: File, field: 'photoUrl' | 'attachmentName'
         </a-col>
         <a-col :xs="24" :lg="10" style="text-align: right;">
           <a-space wrap>
-            <a-button type="primary" @click="openCreateDetail">
-              新增明细
+            <a-button type="primary" @click="openBatchCreate">
+              <PlusOutlined />
+              新增整车资料
             </a-button>
             <a-button @click="exportExpenses">
               导出费用台账
@@ -676,17 +602,17 @@ async function uploadAttachment(file: File, field: 'photoUrl' | 'attachmentName'
           </a-col>
           <a-col :xs="24" :md="8" :xl="4">
             <a-form-item label="费用类型">
-              <a-select v-model:value="queryModel.expenseType" allow-clear :options="expenseTypes.map(item => ({ label: item, value: item }))" />
+              <a-select v-model:value="queryModel.expenseType" allow-clear :options="expenseTypeOptions" />
             </a-form-item>
           </a-col>
           <a-col :xs="24" :md="8" :xl="4">
             <a-form-item label="证照类型">
-              <a-select v-model:value="queryModel.licenseType" allow-clear :options="licenseTypes.map(item => ({ label: item, value: item }))" />
+              <a-select v-model:value="queryModel.licenseType" allow-clear :options="licenseTypeOptions" />
             </a-form-item>
           </a-col>
           <a-col :xs="24" :md="8" :xl="4">
-            <a-form-item label="提醒类型">
-              <a-select v-model:value="queryModel.reminderType" allow-clear :options="reminderTypes.map(item => ({ label: item, value: item }))" />
+            <a-form-item label="保险类型">
+              <a-input v-model:value="queryModel.insuranceType" allow-clear placeholder="例如 交强险" />
             </a-form-item>
           </a-col>
           <a-col :xs="24" :md="8" :xl="4">
@@ -725,61 +651,129 @@ async function uploadAttachment(file: File, field: 'photoUrl' | 'attachmentName'
       </div>
     </section>
 
-    <a-card title="办公用车明细表" :bordered="false" class="office-section-card">
-      <template #extra>
-        <a-space>
-          <a-tag color="blue">
-            当前 {{ filteredOfficeDetailRows.length }} / 共 {{ officeDetailRows.length }} 条
-          </a-tag>
-          <a-button type="primary" @click="openCreateDetail">
-            新增明细
-          </a-button>
-        </a-space>
-      </template>
-      <div class="detail-filter-bar">
-        <a-segmented v-model:value="detailSectionFilter" :options="detailFilterOptions" />
-      </div>
-      <a-table :key="detailSectionFilter" row-key="id" :loading="loading" :columns="officeDetailColumns" :data-source="filteredOfficeDetailRows" :pagination="{ defaultPageSize: 10, pageSizeOptions: ['10', '20', '50', '100'], showSizeChanger: true }" :scroll="{ x: officeDetailScrollX }">
-        <template #bodyCell="{ column, record }">
-          <template v-if="column.dataIndex === 'sectionLabel'">
-            <a-tag :color="sectionColor(record.section)">
-              {{ record.sectionLabel }}
-            </a-tag>
-          </template>
-          <template v-else-if="['status', 'approvalStatus'].includes(columnKey(column.dataIndex))">
-            <a-tag :color="statusColor(record[columnKey(column.dataIndex)])">
-              {{ record[columnKey(column.dataIndex)] }}
-            </a-tag>
-          </template>
-          <template v-else-if="column.dataIndex === 'action'">
-            <RecordActions :actions="buildActions(record.section, record.raw)" />
-          </template>
-          <template v-else>
-            <a-tooltip :title="displayCell(record, columnKey(column.dataIndex))">
-              <span class="cell-ellipsis">{{ displayCell(record, columnKey(column.dataIndex)) }}</span>
-            </a-tooltip>
-          </template>
-        </template>
-      </a-table>
+    <a-card :bordered="false" class="office-section-card">
+      <a-tabs v-model:active-key="activeContentTab" class="office-content-tabs">
+        <a-tab-pane key="vehicles" tab="车辆汇总">
+          <div class="tab-toolbar">
+            <div>
+              <strong>办公用车汇总表</strong>
+              <span>按车辆查看费用、证照、保险和到期风险</span>
+            </div>
+            <a-space wrap>
+              <a-tag color="blue">
+                当前 {{ filteredVehicleSummaryRows.length }} / 共 {{ vehicleSummaryRows.length }} 辆
+              </a-tag>
+              <a-button type="primary" @click="openBatchCreate">
+                <PlusOutlined />
+                新增整车资料
+              </a-button>
+            </a-space>
+          </div>
+          <a-table row-key="id" :loading="loading" :columns="vehicleSummaryColumns" :data-source="filteredVehicleSummaryRows" :pagination="{ defaultPageSize: 10, pageSizeOptions: ['10', '20', '50', '100'], showSizeChanger: true, showTotal: (total: number) => `共 ${total} 辆` }" :scroll="{ x: vehicleSummaryScrollX }">
+            <template #bodyCell="{ column, record }">
+              <template v-if="column.dataIndex === 'vehicleInfo'">
+                <button type="button" class="vehicle-link" @click="openDetail(record)">
+                  <strong>{{ record.plateNo }}</strong>
+                </button>
+              </template>
+              <template v-else-if="column.dataIndex === 'ownership'">
+                <div class="table-stack">
+                  <strong>{{ record.departmentName || '-' }}</strong>
+                </div>
+              </template>
+              <template v-else-if="column.dataIndex === 'licenseOverview'">
+                <div v-if="record.nearestLicense" class="table-stack">
+                  <span><a-tag :color="statusColor(record.nearestLicense.status)">{{ record.nearestLicense.status }}</a-tag>{{ record.nearestLicense.licenseType }}</span><small>到期日期：{{ record.nearestLicense.expiryDate }} · 共 {{ record.licenses.length }} 项</small>
+                </div>
+                <span v-else class="empty-cell">未录入证照</span>
+              </template>
+              <template v-else-if="column.dataIndex === 'insuranceOverview'">
+                <div v-if="record.nearestInsurance" class="table-stack">
+                  <span><a-tag :color="statusColor(record.nearestInsurance.status)">{{ record.nearestInsurance.status }}</a-tag>{{ record.nearestInsurance.insuranceType }}</span><small>到期日期：{{ record.nearestInsurance.endDate }} · 共 {{ record.insurances.length }} 项</small>
+                </div>
+                <span v-else class="empty-cell">未录入保险</span>
+              </template>
+              <template v-else-if="column.dataIndex === 'status'">
+                <a-tag :color="statusColor(record.status)">
+                  {{ record.status }}
+                </a-tag>
+              </template>
+              <template v-else-if="column.dataIndex === 'action'">
+                <a-space :size="4" class="vehicle-actions">
+                  <a-button type="link" size="small" @click="openDetail(record)">
+                    查看
+                  </a-button>
+                  <a-button type="link" size="small" @click="openBatchForVehicle(record)">
+                    补充资料
+                  </a-button>
+                  <a-dropdown>
+                    <a-button type="link" size="small">
+                      更多
+                    </a-button>
+                    <template #overlay>
+                      <a-menu>
+                        <a-menu-item v-if="canEditVehicle(record)" @click="openEdit('vehicle', record)">
+                          编辑车辆
+                        </a-menu-item>
+                        <a-menu-item v-if="canDeleteVehicle(record)">
+                          <a-popconfirm title="确定删除该车辆档案？" ok-text="确定" cancel-text="取消" @confirm="runDelete(() => deleteOfficeVehicleApi(record.id))">
+                            <span class="danger-action">删除车辆</span>
+                          </a-popconfirm>
+                        </a-menu-item>
+                      </a-menu>
+                    </template>
+                  </a-dropdown>
+                </a-space>
+              </template>
+            </template>
+          </a-table>
+        </a-tab-pane>
+        <a-tab-pane key="expenses" tab="本月费用">
+          <div class="tab-toolbar">
+            <div>
+              <strong>本月费用明细</strong>
+              <span>按当前财务期间和查询条件展示费用记录</span>
+            </div>
+            <a-space wrap>
+              <a-tag color="red">
+                {{ filteredExpenseRows.length }} 笔 · {{ money(filteredExpenseAmount) }}
+              </a-tag>
+              <a-button @click="exportExpenses">
+                导出费用台账
+              </a-button>
+            </a-space>
+          </div>
+          <a-table row-key="id" :loading="loading" :columns="detailExpenseColumns" :data-source="filteredExpenseRows" :pagination="{ defaultPageSize: 10, pageSizeOptions: ['10', '20', '50', '100'], showSizeChanger: true, showTotal: (total: number) => `共 ${total} 笔` }" :scroll="{ x: detailExpenseScrollX }">
+            <template #bodyCell="{ column, record }">
+              <RecordActions v-if="column.dataIndex === 'action'" :actions="buildActions('expenses', record)" />
+              <a-tag v-else-if="column.dataIndex === 'approvalStatus'" :color="statusColor(record.approvalStatus)">
+                {{ record.approvalStatus }}
+              </a-tag>
+              <span v-else-if="column.dataIndex === 'amount'" class="expense-amount">{{ money(record.amount) }}</span>
+              <a-tooltip v-else :title="displayBusinessTableValue(getBusinessTableValue(record, column.dataIndex))">
+                <span class="cell-ellipsis">
+                  {{ displayBusinessTableValue(getBusinessTableValue(record, column.dataIndex)) }}
+                </span>
+              </a-tooltip>
+            </template>
+          </a-table>
+        </a-tab-pane>
+      </a-tabs>
     </a-card>
 
-    <a-modal v-model:open="editOpen" :title="editing.id ? `编辑${modalTypeLabel(modalType)}` : '新增办公用车明细'" width="760px" :mask-closable="false" ok-text="保存" @ok="saveEdit">
-      <div v-if="!editing.id" class="create-type-picker">
-        <div class="create-type-label">
-          明细类型
-        </div>
-        <a-segmented :value="modalType" block :options="createTypeOptions" @change="changeCreateType" />
-      </div>
+    <OfficeVehicleBatchModal v-model:open="batchOpen" :initial-vehicle="batchVehicle" @saved="loadList" />
+
+    <a-modal v-model:open="editOpen" :title="editing.id ? `编辑${modalTypeLabel(modalType)}` : '新增办公用车明细'" width="760px" :mask-closable="false" :closable="!editSaving" :keyboard="!editSaving" :confirm-loading="editSaving" :cancel-button-props="{ disabled: editSaving }" ok-text="保存" @ok="saveEdit">
       <a-form layout="vertical">
         <a-row :gutter="16">
           <template v-if="modalType === 'vehicle'">
             <a-col :xs="24" :md="12">
-              <a-form-item label="车牌号">
+              <a-form-item label="车牌号" required>
                 <a-input v-model:value="editing.plateNo" />
               </a-form-item>
             </a-col>
             <a-col :xs="24" :md="12">
-              <a-form-item label="品牌型号">
+              <a-form-item label="品牌型号" required>
                 <a-input v-model:value="editing.brandModel" />
               </a-form-item>
             </a-col>
@@ -831,22 +825,22 @@ async function uploadAttachment(file: File, field: 'photoUrl' | 'attachmentName'
           </template>
           <template v-if="modalType === 'expense'">
             <a-col :xs="24" :md="12">
-              <a-form-item label="车辆">
+              <a-form-item label="车辆" required>
                 <a-select v-model:value="editing.vehicleId" :options="vehicleOptions" />
               </a-form-item>
             </a-col>
             <a-col :xs="24" :md="12">
-              <a-form-item label="费用类型">
-                <a-select v-model:value="editing.expenseType" :options="expenseTypes.map(item => ({ label: item, value: item }))" />
+              <a-form-item label="费用类型" required>
+                <a-select v-model:value="editing.expenseType" :options="expenseTypeOptions" />
               </a-form-item>
             </a-col>
             <a-col :xs="24" :md="12">
-              <a-form-item label="费用金额">
-                <a-input-number v-model:value="editing.amount" :min="0" :precision="2" style="width: 100%;" />
+              <a-form-item label="费用金额" required>
+                <business-input-number v-model:value="editing.amount" :min="0" :precision="2" style="width: 100%;" />
               </a-form-item>
             </a-col>
             <a-col :xs="24" :md="12">
-              <a-form-item label="发生日期">
+              <a-form-item label="发生日期" required>
                 <a-date-picker v-model:value="editing.occurredDate" value-format="YYYY-MM-DD" style="width: 100%;" />
               </a-form-item>
             </a-col>
@@ -862,7 +856,7 @@ async function uploadAttachment(file: File, field: 'photoUrl' | 'attachmentName'
             </a-col>
             <a-col :xs="24" :md="12">
               <a-form-item label="支付方式">
-                <a-select v-model:value="editing.paymentMethod" :options="paymentMethods.map(item => ({ label: item, value: item }))" />
+                <a-select v-model:value="editing.paymentMethod" :options="paymentMethodOptions" />
               </a-form-item>
             </a-col>
             <a-col :xs="24" :md="12">
@@ -899,7 +893,7 @@ async function uploadAttachment(file: File, field: 'photoUrl' | 'attachmentName'
             </a-col>
             <a-col :xs="24" :md="12">
               <a-form-item label="证照类型">
-                <a-select v-model:value="editing.licenseType" :options="licenseTypes.map(item => ({ label: item, value: item }))" />
+                <a-select v-model:value="editing.licenseType" :options="licenseTypeOptions" />
               </a-form-item>
             </a-col>
             <a-col :xs="24" :md="12">
@@ -961,7 +955,7 @@ async function uploadAttachment(file: File, field: 'photoUrl' | 'attachmentName'
             </a-col>
             <a-col :xs="24" :md="12">
               <a-form-item label="保费">
-                <a-input-number v-model:value="editing.amount" :min="0" :precision="2" style="width: 100%;" />
+                <business-input-number v-model:value="editing.amount" :min="0" :precision="2" style="width: 100%;" />
               </a-form-item>
             </a-col>
             <a-col :xs="24" :md="12">
@@ -985,34 +979,7 @@ async function uploadAttachment(file: File, field: 'photoUrl' | 'attachmentName'
               </a-form-item>
             </a-col>
           </template>
-          <template v-if="modalType === 'reminder'">
-            <a-col :xs="24" :md="12">
-              <a-form-item label="车辆" required>
-                <a-select v-model:value="editing.vehicleId" show-search option-filter-prop="label" :options="vehicleOptions" placeholder="请选择车辆" />
-              </a-form-item>
-            </a-col>
-            <a-col :xs="24" :md="12">
-              <a-form-item label="事项类型" required>
-                <a-select v-model:value="editing.reminderType" :options="reminderTypes.slice(0, 3).map(item => ({ label: item, value: item }))" placeholder="请选择事项类型" />
-              </a-form-item>
-            </a-col>
-            <a-col :xs="24" :md="12">
-              <a-form-item :label="editing.reminderType === '车辆保养时间' ? '保养日期' : '到期日期'" required>
-                <a-date-picker v-model:value="editing.dueDate" value-format="YYYY-MM-DD" style="width: 100%;" />
-              </a-form-item>
-            </a-col>
-            <a-col :xs="24" :md="12">
-              <a-form-item label="提前提醒天数">
-                <a-input-number v-model:value="editing.remindDays" :min="0" :max="365" :precision="0" style="width: 100%;" />
-              </a-form-item>
-            </a-col>
-            <a-col :xs="24">
-              <a-form-item label="提醒对象">
-                <a-select v-model:value="editing.targetNames" mode="tags" :max-tag-count="3" placeholder="输入姓名或岗位后回车；留空时使用车辆负责人" />
-              </a-form-item>
-            </a-col>
-          </template>
-          <a-col v-if="modalType !== 'reminder'" :xs="24">
+          <a-col :xs="24">
             <a-form-item label="备注">
               <a-textarea v-model:value="editing.remark" :rows="3" />
             </a-form-item>
@@ -1021,7 +988,7 @@ async function uploadAttachment(file: File, field: 'photoUrl' | 'attachmentName'
       </a-form>
     </a-modal>
 
-    <a-modal v-model:open="detailOpen" title="车辆详情" width="960px" :footer="null">
+    <a-drawer v-model:open="detailOpen" title="车辆详情" width="min(1120px, 94vw)">
       <a-descriptions v-if="detail" bordered size="small" :column="2">
         <a-descriptions-item label="车牌号">
           {{ detail.vehicle.plateNo }}
@@ -1044,10 +1011,11 @@ async function uploadAttachment(file: File, field: 'photoUrl' | 'attachmentName'
       </a-descriptions>
       <a-tabs v-if="detail" mt-4>
         <a-tab-pane key="expense" tab="费用记录">
-          <a-table size="small" :pagination="false" :columns="detailExpenseColumns" :data-source="detail.expenses" :scroll="{ x: detailExpenseScrollX }">
+          <a-table size="small" row-key="id" :pagination="false" :columns="detailExpenseColumns" :data-source="detail.expenses" :scroll="{ x: detailExpenseScrollX }">
             <template #bodyCell="{ column, record }">
+              <RecordActions v-if="column.dataIndex === 'action'" :actions="buildActions('expenses', record)" />
               <a-tooltip :title="displayBusinessTableValue(getBusinessTableValue(record, column.dataIndex))">
-                <span class="cell-ellipsis">
+                <span v-if="column.dataIndex !== 'action'" class="cell-ellipsis">
                   {{ displayBusinessTableValue(getBusinessTableValue(record, column.dataIndex)) }}
                 </span>
               </a-tooltip>
@@ -1055,10 +1023,11 @@ async function uploadAttachment(file: File, field: 'photoUrl' | 'attachmentName'
           </a-table>
         </a-tab-pane>
         <a-tab-pane key="license" tab="证照资料">
-          <a-table size="small" :pagination="false" :columns="detailLicenseColumns" :data-source="detail.licenses" :scroll="{ x: detailLicenseScrollX }">
+          <a-table size="small" row-key="id" :pagination="false" :columns="detailLicenseColumns" :data-source="detail.licenses" :scroll="{ x: detailLicenseScrollX }">
             <template #bodyCell="{ column, record }">
+              <RecordActions v-if="column.dataIndex === 'action'" :actions="buildActions('licenses', record)" />
               <a-tooltip :title="displayBusinessTableValue(getBusinessTableValue(record, column.dataIndex))">
-                <span class="cell-ellipsis">
+                <span v-if="column.dataIndex !== 'action'" class="cell-ellipsis">
                   {{ displayBusinessTableValue(getBusinessTableValue(record, column.dataIndex)) }}
                 </span>
               </a-tooltip>
@@ -1066,21 +1035,11 @@ async function uploadAttachment(file: File, field: 'photoUrl' | 'attachmentName'
           </a-table>
         </a-tab-pane>
         <a-tab-pane key="insurance" tab="保险信息">
-          <a-table size="small" :pagination="false" :columns="detailInsuranceColumns" :data-source="detail.insurances" :scroll="{ x: detailInsuranceScrollX }">
+          <a-table size="small" row-key="id" :pagination="false" :columns="detailInsuranceColumns" :data-source="detail.insurances" :scroll="{ x: detailInsuranceScrollX }">
             <template #bodyCell="{ column, record }">
+              <RecordActions v-if="column.dataIndex === 'action'" :actions="buildActions('insurances', record)" />
               <a-tooltip :title="displayBusinessTableValue(getBusinessTableValue(record, column.dataIndex))">
-                <span class="cell-ellipsis">
-                  {{ displayBusinessTableValue(getBusinessTableValue(record, column.dataIndex)) }}
-                </span>
-              </a-tooltip>
-            </template>
-          </a-table>
-        </a-tab-pane>
-        <a-tab-pane key="reminder" tab="到期提醒">
-          <a-table size="small" :pagination="false" :columns="detailReminderColumns" :data-source="detail.reminders" :scroll="{ x: detailReminderScrollX }">
-            <template #bodyCell="{ column, record }">
-              <a-tooltip :title="displayBusinessTableValue(getBusinessTableValue(record, column.dataIndex))">
-                <span class="cell-ellipsis">
+                <span v-if="column.dataIndex !== 'action'" class="cell-ellipsis">
                   {{ displayBusinessTableValue(getBusinessTableValue(record, column.dataIndex)) }}
                 </span>
               </a-tooltip>
@@ -1095,7 +1054,7 @@ async function uploadAttachment(file: File, field: 'photoUrl' | 'attachmentName'
           </a-timeline>
         </a-tab-pane>
       </a-tabs>
-    </a-modal>
+    </a-drawer>
   </page-container>
 </template>
 
@@ -1110,29 +1069,6 @@ async function uploadAttachment(file: File, field: 'photoUrl' | 'attachmentName'
   :deep(.ant-select) {
     width: 100%;
   }
-}
-
-.detail-filter-bar {
-  display: flex;
-  margin-bottom: 16px;
-  overflow-x: auto;
-
-  :deep(.ant-segmented) {
-    min-width: max-content;
-  }
-}
-
-.create-type-picker {
-  margin-bottom: 20px;
-  padding-bottom: 20px;
-  border-bottom: 1px solid #e5e7eb;
-}
-
-.create-type-label {
-  margin-bottom: 8px;
-  color: #334155;
-  font-size: 14px;
-  font-weight: 600;
 }
 
 .office-summary-grid {
@@ -1207,6 +1143,118 @@ async function uploadAttachment(file: File, field: 'photoUrl' | 'attachmentName'
   margin-bottom: 16px;
 }
 
+.office-content-tabs {
+  :deep(.ant-tabs-nav) {
+    margin-bottom: 16px;
+  }
+}
+
+.tab-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 48px;
+  margin-bottom: 12px;
+
+  > div {
+    min-width: 0;
+  }
+
+  strong,
+  span {
+    display: block;
+  }
+
+  strong {
+    color: #1f2937;
+    font-size: 15px;
+  }
+
+  span {
+    margin-top: 3px;
+    color: #6b7280;
+    font-size: 12px;
+  }
+}
+
+.expense-amount {
+  color: #b42318;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.vehicle-link {
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+
+  strong {
+    display: block;
+    color: #1677ff;
+    font-size: 14px;
+    font-weight: 600;
+  }
+
+  &:focus-visible {
+    outline: 2px solid #1677ff;
+    outline-offset: 3px;
+  }
+}
+
+.table-stack {
+  min-width: 0;
+
+  strong,
+  span,
+  small {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  strong,
+  span {
+    color: #1f2937;
+    font-size: 13px;
+  }
+
+  small,
+  > span + span {
+    margin-top: 4px;
+    color: #6b7280;
+    font-size: 12px;
+  }
+
+  :deep(.ant-tag) {
+    margin-inline-end: 6px;
+  }
+}
+
+.empty-cell {
+  color: #6b7280;
+  font-size: 13px;
+}
+
+.vehicle-actions {
+  white-space: nowrap;
+
+  :deep(.ant-btn-link) {
+    padding-inline: 4px;
+  }
+}
+
+.danger-action {
+  color: #dc2626;
+}
+
 .attachment-name {
   margin-top: 8px;
   color: var(--text-color-secondary);
@@ -1223,6 +1271,11 @@ async function uploadAttachment(file: File, field: 'photoUrl' | 'attachmentName'
 @media (max-width: 720px) {
   .office-summary-grid {
     grid-template-columns: 1fr;
+  }
+
+  .tab-toolbar {
+    align-items: flex-start;
+    flex-direction: column;
   }
 }
 </style>

@@ -83,6 +83,28 @@ describe('system store memory backend', () => {
     await systemStore.deleteUser(created.id)
   })
 
+  it('clears a stale post when a user changes department without selecting a new post', async () => {
+    const suffix = Date.now()
+    const created = await systemStore.saveUser({
+      username: `change_department_${suffix}`,
+      nickname: '部门变更测试',
+      mobile: '13900000009',
+      deptId: 'transport',
+      postId: 'post-driver',
+      roleIds: ['role-user'],
+      status: 'enabled',
+    })
+    const updated = await systemStore.saveUser({
+      ...created,
+      deptId: 'finance',
+      deptName: '人事财务部',
+      postId: undefined,
+      postName: '',
+    })
+    expect(updated).toMatchObject({ deptName: '人事财务部', postId: '', postName: '' })
+    await systemStore.deleteUser(created.id)
+  })
+
   it('binds a WeCom identity by mobile and derives its department', async () => {
     const bound = await systemStore.bindWecomIdentity({
       wecomUserId: 'wecom-finance-manager',
@@ -126,6 +148,12 @@ describe('system store memory backend', () => {
     expect((await systemStore.listRoles()).some(item => item.id === role.id)).toBe(true)
     await systemStore.deleteRole(role.id)
     expect((await systemStore.listRoles()).some(item => item.id === role.id)).toBe(false)
+  })
+
+  it('provides centralized business dictionaries and protects built-in values', async () => {
+    const carriers = await systemStore.listDictionaries({ type: 'trade_carrier' })
+    expect(carriers.map(item => item.value)).toEqual(['诚捷', '诚域', '诺锐', '外协车队'])
+    await expect(systemStore.deleteDictionary(carriers[0].id)).rejects.toThrow('系统内置业务主数据不能删除，请改为停用')
   })
 
   it('creates, filters, updates and deletes dictionary entries', async () => {

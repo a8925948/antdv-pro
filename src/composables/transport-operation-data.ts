@@ -8,12 +8,14 @@ export interface FuelRecord extends Record<string, string> {
   location: string
   product: string
   quantity: string
+  quantityUnit: 'L' | 'kg'
   amount: string
   driver: string
 }
 
 export interface EtcRecord extends Record<string, string> {
   code: string
+  summaryNo: string
   name: string
   owner: string
   status: string
@@ -54,7 +56,7 @@ export interface OrderRecord extends Record<string, string> {
 export interface DriverPayrollRecord extends Record<string, string | undefined> {
   code: string
   name: string
-  crewRole?: '司机' | '押运员'
+  crewRole?: '司机' | '押运员' | '模式配置'
   plateNo?: string
   plateNos?: string
   financeMonth?: string
@@ -162,6 +164,7 @@ export interface TransportOperationDataset {
   maintenance: MaintenanceRecord[]
   inventoryMovements: InventoryMovementRecord[]
   vehicleLoans: VehicleLoanRecord[]
+  baseCompanies?: Array<Record<string, string>>
   baseCustomers: Array<Record<string, string>>
   baseVehicles: Array<Record<string, string>>
   baseCrews: Array<Record<string, string>>
@@ -223,6 +226,7 @@ export const transportDriverPayrollRows = ref<DriverPayrollRecord[]>([])
 export const transportMaintenanceRows = ref<MaintenanceRecord[]>([])
 export const transportInventoryMovementRows = ref<InventoryMovementRecord[]>([])
 export const transportVehicleLoanRows = ref<VehicleLoanRecord[]>([])
+export const transportBaseCompanyRows = ref<Array<Record<string, string>>>([])
 export const transportBaseCustomerRows = ref<Array<Record<string, string>>>([])
 export const transportBaseVehicleRows = ref<Array<Record<string, string>>>([])
 export const transportBaseCrewRows = ref<Array<Record<string, string>>>([])
@@ -234,6 +238,22 @@ let loadPromise: Promise<void> | undefined
 let saveQueue: Promise<void> = Promise.resolve()
 let changeVersion = 0
 let datasetRevision = ''
+let baselineDataset: TransportOperationDataset | undefined
+
+const datasetKeys: Array<keyof TransportOperationDataset> = [
+  'orders',
+  'fuels',
+  'etc',
+  'driverPayrolls',
+  'maintenance',
+  'inventoryMovements',
+  'vehicleLoans',
+  'baseCompanies',
+  'baseCustomers',
+  'baseVehicles',
+  'baseCrews',
+  'baseRoutes',
+]
 
 function normalizeCustomerName(value: unknown) {
   return String(value ?? '').trim()
@@ -302,105 +322,83 @@ export function syncTransportCustomersFromOrders() {
   return changed
 }
 
-function normalizeRouteIdentity(value: unknown) {
-  return String(value ?? '').trim().replace(/[\s·・,，/至到—–-]+/g, '').toLowerCase()
-}
-
-function createRouteCode(rows: Array<Record<string, string>>) {
-  const maxNo = rows.reduce((max, row) => {
-    const match = String(row.code ?? '').match(/^LX(\d+)$/)
-    return match ? Math.max(max, Number(match[1])) : max
-  }, 0)
-  return `LX${String(maxNo + 1).padStart(3, '0')}`
-}
-
-export function syncTransportRoutesFromOrders() {
-  const routes = transportBaseRouteRows.value
-  const routeKeys = new Set(routes.map(row => normalizeRouteIdentity(row.name)).filter(Boolean))
-  let changed = false
-
-  transportOrderRows.value.forEach((order) => {
-    const name = String(order.routeLine ?? '').trim()
-    const routeKey = normalizeRouteIdentity(name)
-    if (!name || !routeKey || routeKeys.has(routeKey))
-      return
-
-    const loadingAddress = String(order.loadingAddress ?? '').trim()
-    const unloadingAddress = String(order.unloadingAddress ?? '').trim()
-    routes.push({
-      code: createRouteCode(routes),
-      customer: String(order.customer ?? '').trim(),
-      name,
-      loadingAddress,
-      unloadingAddress,
-      destinationName: unloadingAddress,
-      destinationArea: '',
-      distance: String(order.mileage ?? order.distance ?? '').trim(),
-      freightPrice: String(order.freightPrice ?? '').trim(),
-      loadingFenceName: loadingAddress ? `${loadingAddress}装车围栏` : '',
-      loadingFenceRadius: '1.5km',
-      transitFenceName: loadingAddress && unloadingAddress ? `${loadingAddress}至${unloadingAddress}运输围栏` : '',
-      unloadingFenceName: unloadingAddress ? `${unloadingAddress}卸车围栏` : '',
-      unloadingFenceRadius: '1.5km',
-      returnFenceName: loadingAddress && unloadingAddress ? `${unloadingAddress}至${loadingAddress}运输围栏` : '',
-      status: '启用',
-      routeValidityType: '长期',
-      routeValidityRange: '',
-      updatedAt: new Date().toISOString().slice(0, 10),
-      source: '运输订单',
-    })
-    routeKeys.add(routeKey)
-    changed = true
-  })
-  return changed
-}
-
 function normalizeCrewPlateNo(value: unknown) {
   return String(value ?? '').trim().replace(/[\s·•\-]/g, '').toUpperCase()
 }
 
 function payrollMonthKey(date = new Date()) {
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`
+  const financialMonth = new Date(date.getFullYear(), date.getMonth() + (date.getDate() >= 26 ? 1 : 0), 1)
+  return `${financialMonth.getFullYear()}-${String(financialMonth.getMonth() + 1).padStart(2, '0')}`
+}
+
+function payrollMonthStart(month: string) {
+  const [year, monthNumber] = month.split('-').map(Number)
+  const start = new Date(year, monthNumber - 2, 26)
+  return `${start.getFullYear()}-${String(start.getMonth() + 1).padStart(2, '0')}-26`
+}
+
+function previousPayrollMonth(month: string) {
+  const [year, monthNumber] = month.split('-').map(Number)
+  const previous = new Date(year, monthNumber - 2, 1)
+  return `${previous.getFullYear()}-${String(previous.getMonth() + 1).padStart(2, '0')}`
+}
+
+function lastSalaryMode(record: Record<string, string | undefined>) {
+  try {
+    const history = JSON.parse(String(record.salaryModeHistory || '[]'))
+    if (Array.isArray(history) && history.length) {
+      const latest = history
+        .filter(item => item?.mode && item?.startDate)
+        .sort((a, b) => String(a.startDate).localeCompare(String(b.startDate)))
+        .at(-1)
+      if (latest)
+        return { mode: String(latest.mode), amount: String(latest.amount || '0.00') }
+    }
+  }
+  catch {}
+  return { mode: String(record.salaryMode || '固定月薪'), amount: String(record.modeAmount || record.baseSalary || '0.00') }
+}
+
+function configuredSalaryModeAmount(mode: string) {
+  return String(transportDriverPayrollRows.value.find(row => row.crewRole === '模式配置' && row.salaryMode === mode)?.modeAmount || '0.00')
 }
 
 /** Keep payroll identities and vehicle bindings aligned with the base crew archive. */
-export function syncDriverPayrollFromBaseData() {
-  const bindings = new Map<string, { name: string, role: '司机' | '押运员', plates: Set<string> }>()
-  const addBinding = (nameValue: unknown, role: '司机' | '押运员', plateValue: unknown) => {
+export function syncDriverPayrollFromBaseData(date = new Date()) {
+  const month = payrollMonthKey(date)
+  const bindings = new Map<string, { name: string, plates: Set<string> }>()
+  const addBinding = (nameValue: unknown, plateValue: unknown) => {
     const name = String(nameValue ?? '').trim()
     const plate = normalizeCrewPlateNo(plateValue)
     if (!name || !plate)
       return
-    const key = `${role}:${name}`
-    const binding = bindings.get(key) ?? { name, role, plates: new Set<string>() }
+    const binding = bindings.get(name) ?? { name, plates: new Set<string>() }
     binding.plates.add(plate)
-    bindings.set(key, binding)
+    bindings.set(name, binding)
   }
 
   transportBaseCrewRows.value.forEach((row) => {
     const plate = row.plateNo || row.vehicleInfo || row.vehicle || row.code
-    addBinding(row.driverName || row.driver, '司机', plate)
-    addBinding(row.escortName || row.escort, '押运员', plate)
+    addBinding(row.driverName || row.driver, plate)
   })
   transportBaseVehicleRows.value.forEach((row) => {
     const plate = row.plateNo || row.code
-    addBinding(row.driverName || row.driver, '司机', plate)
-    addBinding(row.escortName || row.escort, '押运员', plate)
+    addBinding(row.driverName || row.driver, plate)
   })
 
   let changed = false
-  bindings.forEach((binding, key) => {
+  bindings.forEach((binding) => {
     const existing = transportDriverPayrollRows.value.find((row) => {
       const rowRole = row.crewRole || '司机'
-      return `${rowRole}:${String(row.name ?? '').trim()}` === key
+      return rowRole === '司机' && String(row.name ?? '').trim() === binding.name && String(row.financeMonth || '') === month
     })
     const plates = [...binding.plates].sort((a, b) => a.localeCompare(b, 'zh-CN'))
     const plateNos = plates.join('、')
     if (existing) {
       if (existing.manualPlateNos === 'true')
         return
-      if (existing.crewRole !== binding.role || existing.plateNos !== plateNos || existing.plateNo !== plates[0]) {
-        existing.crewRole = binding.role
+      if (existing.crewRole !== '司机' || existing.plateNos !== plateNos || existing.plateNo !== plates[0]) {
+        existing.crewRole = '司机'
         existing.plateNos = plateNos
         existing.plateNo = plates[0]
         existing.owner = `${plateNos} / ${existing.financeMonth || payrollMonthKey()}`
@@ -409,23 +407,34 @@ export function syncDriverPayrollFromBaseData() {
       return
     }
 
-    const month = payrollMonthKey()
+    const previousRecord = transportDriverPayrollRows.value.find((row) => {
+      const rowRole = row.crewRole || '司机'
+      return rowRole === '司机' && String(row.name ?? '').trim() === binding.name && String(row.financeMonth || '') === previousPayrollMonth(month)
+    })
+    const inheritedMode = previousRecord ? lastSalaryMode(previousRecord) : { mode: '固定月薪', amount: configuredSalaryModeAmount('固定月薪') }
+    const inheritedPlateNos = previousRecord?.plateNos || previousRecord?.plateNo || plateNos
+    const inheritedPlates = String(inheritedPlateNos).split(/[、,，/]/).map(item => normalizeCrewPlateNo(item)).filter(Boolean)
+    const monthStart = payrollMonthStart(month)
     const sequence = transportDriverPayrollRows.value.length + 1
     transportDriverPayrollRows.value.push({
       code: `XC${month.replace('-', '')}${String(sequence).padStart(4, '0')}`,
       name: binding.name,
-      crewRole: binding.role,
-      plateNo: plates[0],
-      plateNos,
+      crewRole: '司机',
+      plateNo: inheritedPlates[0] || plates[0],
+      plateNos: inheritedPlates.join('、') || plateNos,
       financeMonth: month,
-      owner: `${plateNos} / ${month}`,
+      owner: `${inheritedPlates.join('、') || plateNos} / ${month}`,
       status: '核算中',
-      salaryMode: '固定月薪',
-      modeStartDate: `${month}-01`,
+      salaryMode: inheritedMode.mode,
+      modeAmount: inheritedMode.amount,
+      salaryModeHistory: JSON.stringify([{ mode: inheritedMode.mode, startDate: monthStart, amount: inheritedMode.amount }]),
+      modeStartDate: monthStart,
+      plateStartDates: previousRecord?.plateStartDates || '{}',
+      manualPlateNos: previousRecord ? 'true' : '',
       attendanceDays: '0',
       attendanceDates: '',
       tripCount: '0',
-      baseSalary: '0.00',
+      baseSalary: inheritedMode.mode.includes('固定') || inheritedMode.mode === '底薪+差费' ? inheritedMode.amount : '0.00',
       tripCommission: '0.00',
       allowance: '0.00',
       deduction: '0.00',
@@ -469,11 +478,50 @@ function currentDataset(): TransportOperationDataset {
     maintenance: cloneRows(transportMaintenanceRows.value),
     inventoryMovements: cloneRows(transportInventoryMovementRows.value),
     vehicleLoans: cloneRows(transportVehicleLoanRows.value),
+    baseCompanies: cloneRows(transportBaseCompanyRows.value),
     baseCustomers: cloneRows(transportBaseCustomerRows.value),
     baseVehicles: cloneRows(transportBaseVehicleRows.value),
     baseCrews: cloneRows(transportBaseCrewRows.value),
     baseRoutes: cloneRows(transportBaseRouteRows.value),
   }
+}
+
+function datasetPartitionChanged(
+  left: Partial<TransportOperationDataset>,
+  right: Partial<TransportOperationDataset>,
+  key: keyof TransportOperationDataset,
+) {
+  return JSON.stringify(left[key] ?? []) !== JSON.stringify(right[key] ?? [])
+}
+
+async function fetchLatestDataset() {
+  const response = await fetchTransportOperation('/api/transport/operations/data', {
+    headers: authHeaders(),
+  })
+  const result = await response.json()
+  if (result.code !== 200)
+    throw new Error(result.msg || '运输运营数据刷新失败')
+  return {
+    data: result.data as Partial<TransportOperationDataset>,
+    revision: String(result.revision || ''),
+  }
+}
+
+async function rebaseUnrelatedRemoteChanges(local: TransportOperationDataset) {
+  if (!baselineDataset)
+    return undefined
+
+  const latest = await fetchLatestDataset()
+  const changedKeys = datasetKeys.filter(key => datasetPartitionChanged(local, baselineDataset!, key))
+  const conflictingKeys = changedKeys.filter(key => datasetPartitionChanged(latest.data, baselineDataset!, key))
+  if (conflictingKeys.length)
+    return undefined
+
+  const merged = { ...latest.data } as TransportOperationDataset
+  changedKeys.forEach((key) => {
+    ;(merged as any)[key] = cloneRows<any>(local[key] as any[])
+  })
+  return { data: merged, revision: latest.revision }
 }
 
 function applyDataset(data: Partial<TransportOperationDataset>) {
@@ -485,19 +533,34 @@ function applyDataset(data: Partial<TransportOperationDataset>) {
   transportMaintenanceRows.value = cloneRows(data.maintenance)
   transportInventoryMovementRows.value = cloneRows(data.inventoryMovements)
   transportVehicleLoanRows.value = cloneRows(data.vehicleLoans)
+  transportBaseCompanyRows.value.splice(0, transportBaseCompanyRows.value.length, ...cloneRows(data.baseCompanies))
   transportBaseCustomerRows.value.splice(0, transportBaseCustomerRows.value.length, ...cloneRows(data.baseCustomers))
   transportBaseVehicleRows.value.splice(0, transportBaseVehicleRows.value.length, ...cloneRows(data.baseVehicles))
   transportBaseCrewRows.value.splice(0, transportBaseCrewRows.value.length, ...cloneRows(data.baseCrews))
   const baseRoutes = cloneRows(data.baseRoutes).map(normalizeTransportBaseRouteFuelUnits)
   transportBaseRouteRows.value.splice(0, transportBaseRouteRows.value.length, ...baseRoutes)
   const customersChanged = syncTransportCustomersFromOrders()
-  const routesChanged = syncTransportRoutesFromOrders()
   nextTick(() => {
     applyingRemoteData = false
-    syncDriverPayrollFromBaseData()
-    if (customersChanged || routesChanged)
+    const payrollChanged = syncDriverPayrollFromBaseData()
+    if (customersChanged || payrollChanged)
       schedulePersist()
   })
+}
+
+/** Apply a server-confirmed partition mutation without triggering the legacy full-dataset autosave. */
+export async function applyTransportOperationMutation(mutate: () => void) {
+  const dirtyBeforeMutation = transportOperationDirty.value
+  applyingRemoteData = true
+  try {
+    mutate()
+    await nextTick()
+    baselineDataset = currentDataset()
+    transportOperationDirty.value = dirtyBeforeMutation
+  }
+  finally {
+    applyingRemoteData = false
+  }
 }
 
 export async function loadTransportOperationData(options: { force?: boolean } = {}) {
@@ -519,6 +582,7 @@ export async function loadTransportOperationData(options: { force?: boolean } = 
         throw new Error(result.msg || '运输运营数据加载失败')
       applyDataset(result.data || {})
       datasetRevision = String(result.revision || '')
+      baselineDataset = currentDataset()
       transportOperationHydrated.value = true
     }
     catch (error: any) {
@@ -537,21 +601,41 @@ export async function loadTransportOperationData(options: { force?: boolean } = 
   }
 }
 
-async function persistCurrentDataset() {
+async function persistCurrentDataset(options: { confirmDestructiveReplace?: boolean } = {}) {
   if (!transportOperationHydrated.value || applyingRemoteData)
     return
   transportOperationSaving.value = true
   const savingVersion = changeVersion
   try {
-    const response = await fetchTransportOperation('/api/transport/operations/data', {
-      method: 'PUT',
-      headers: authHeaders(),
-      body: JSON.stringify({ ...currentDataset(), expectedRevision: datasetRevision }),
-    })
-    const result = await response.json()
-    if (result.code !== 200)
-      throw new Error(result.msg || '运输运营数据保存失败')
+    let data = currentDataset()
+    let revision = datasetRevision
+    let result: any
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const response = await fetchTransportOperation('/api/transport/operations/data', {
+        method: 'PUT',
+        headers: authHeaders(),
+        body: JSON.stringify({
+          ...data,
+          expectedRevision: revision,
+          ...(options.confirmDestructiveReplace ? { confirmDestructiveReplace: true } : {}),
+        }),
+      })
+      result = await response.json()
+      if (result.code === 200)
+        break
+      if (attempt > 0 || !String(result.msg || '').includes('数据已被其他用户更新'))
+        throw new Error(result.msg || '运输运营数据保存失败')
+      const rebased = await rebaseUnrelatedRemoteChanges(data)
+      if (!rebased)
+        throw new Error('当前模块的数据已被其他用户更新，请刷新后重新录入')
+      data = rebased.data
+      revision = rebased.revision
+    }
+    if (result?.code !== 200)
+      throw new Error(result?.msg || '运输运营数据保存失败')
     datasetRevision = String(result.revision || datasetRevision)
+    baselineDataset = data
+    applyDataset(data)
     transportOperationError.value = ''
     if (savingVersion === changeVersion)
       transportOperationDirty.value = false
@@ -565,18 +649,18 @@ async function persistCurrentDataset() {
   }
 }
 
-export function saveTransportOperationData() {
-  const queued = saveQueue.catch(() => undefined).then(persistCurrentDataset)
+export function saveTransportOperationData(options: { confirmDestructiveReplace?: boolean } = {}) {
+  const queued = saveQueue.catch(() => undefined).then(() => persistCurrentDataset(options))
   saveQueue = queued
   return queued
 }
 
-export async function flushTransportOperationData() {
+export async function flushTransportOperationData(options: { confirmDestructiveReplace?: boolean } = {}) {
   if (persistTimer) {
     clearTimeout(persistTimer)
     persistTimer = undefined
   }
-  await saveTransportOperationData()
+  await saveTransportOperationData(options)
 }
 
 function schedulePersist() {
@@ -602,6 +686,7 @@ watch([
   transportMaintenanceRows,
   transportInventoryMovementRows,
   transportVehicleLoanRows,
+  transportBaseCompanyRows,
   transportBaseCustomerRows,
   transportBaseVehicleRows,
   transportBaseCrewRows,
@@ -610,9 +695,8 @@ watch([
 
 watch(transportOrderRows, () => {
   syncTransportCustomersFromOrders()
-  syncTransportRoutesFromOrders()
 }, { deep: true })
-watch([transportBaseVehicleRows, transportBaseCrewRows], syncDriverPayrollFromBaseData, { deep: true })
+watch([transportBaseVehicleRows, transportBaseCrewRows], () => syncDriverPayrollFromBaseData(), { deep: true })
 
 if (typeof window !== 'undefined')
   void loadTransportOperationData()

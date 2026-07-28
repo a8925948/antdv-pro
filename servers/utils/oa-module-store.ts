@@ -18,6 +18,7 @@ export interface OaModuleState {
 export type OaStatePartition = OaModuleKey | 'cashBalance'
 
 export interface RegisterReceiptInput {
+  cashBalanceId?: string
   accountName: string
   amount: number
   receiptDate: string
@@ -37,6 +38,13 @@ export interface ReceiptAllocationInput {
   remark?: string
 }
 
+export interface AllocateReceiptInput {
+  allocations: ReceiptAllocationInput[]
+  cashBalanceId: string
+  allocationBatchId: string
+  handler?: string
+}
+
 export interface PaymentAllocationInput {
   payableId: string
   amount: number
@@ -45,6 +53,9 @@ export interface PaymentAllocationInput {
 
 export interface CreatePaymentInstructionInput {
   paymentRequestNo: string
+  cashBalanceId?: string
+  companyName?: string
+  accountNo?: string
   accountName: string
   paymentDate: string
   payeeName: string
@@ -74,6 +85,7 @@ export interface BankPaymentCallbackInput {
 const unsettledPaymentStatuses = ['PENDING', 'PROCESSING']
 
 const moduleKeys: OaModuleKey[] = ['dashboard', 'receivable', 'cash', 'salary', 'org', 'vehicle']
+const lockedSalaryStatuses = new Set(['审批通过', '已锁定', '已发放', '已作废', '已归档'])
 
 function now() {
   return new Date().toISOString().slice(0, 19).replace('T', ' ')
@@ -85,6 +97,31 @@ function cloneState(state: OaModuleState): OaModuleState {
 
 function cloneValue<T>(value: T): T {
   return JSON.parse(JSON.stringify(value))
+}
+
+function stableValue(value: unknown): unknown {
+  if (Array.isArray(value))
+    return value.map(item => stableValue(item))
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b)).map(([key, item]) => [key, stableValue(item)]))
+  }
+  return value
+}
+
+function assertSalaryPartitionUpdate(previousRows: Array<Record<string, any>>, nextRows: Array<Record<string, any>>) {
+  const nextById = new Map(nextRows.map(row => [String(row.id), row]))
+  for (const previous of previousRows) {
+    if (!lockedSalaryStatuses.has(String(previous.status)))
+      continue
+    const id = String(previous.id)
+    const next = nextById.get(id)
+    if (!next)
+      throw new Error(`工资记录 ${previous.employeeName || id} 已锁定，不能删除`)
+    if (!lockedSalaryStatuses.has(String(next.status)))
+      throw new Error(`工资记录 ${previous.employeeName || id} 已锁定，不能回退状态`)
+    if (JSON.stringify(stableValue(previous)) !== JSON.stringify(stableValue(next)))
+      throw new Error(`工资记录 ${previous.employeeName || id} 已锁定，不能修改`)
+  }
 }
 
 function normalizeState(input: Partial<OaModuleState> = {}): OaModuleState {
@@ -181,6 +218,73 @@ function receiptStatus(recognizedAmount: number, amount: number) {
   return recognizedAmount >= amount ? '已核销' : '部分认领'
 }
 
+function cashBalanceDisplayName(account: Record<string, any>) {
+  return String(account.bank_name || account.account_name || '').trim()
+}
+
+function postReceiptToCashBalance(
+  state: OaModuleState,
+  receipt: Record<string, any>,
+  cashBalanceId: string,
+  handler = '',
+) {
+  const account = state.cashBalanceRecords.find(row => String(row.id) === String(cashBalanceId))
+  if (!account)
+    throw new Error('核销对应的收款账户不存在')
+  if (receipt.cashBalanceId && String(receipt.cashBalanceId) !== String(account.id))
+    throw new Error('该来款已经绑定其他收款账户')
+
+  const existingMovement = (Array.isArray(account.balanceMovements) ? account.balanceMovements : [])
+    .find((item: any) => item.type === 'RECEIPT' && String(item.receiptId) === String(receipt.id))
+  if (receipt.balancePostedAt || existingMovement) {
+    receipt.cashBalanceId = account.id
+    return account
+  }
+
+  const amount = Number(Number(receipt.incomeAmount || 0).toFixed(2))
+  const balanceBefore = Number(account.balance_amount || 0)
+  const balanceAfter = Number((balanceBefore + amount).toFixed(2))
+  const postedAt = now()
+  account.balanceMovements = Array.isArray(account.balanceMovements) ? account.balanceMovements : []
+  account.balanceMovements.unshift({
+    id: `receipt-posting-${receipt.id}`,
+    type: 'RECEIPT',
+    direction: 'IN',
+    amount,
+    balanceBefore,
+    balanceAfter,
+    receiptId: receipt.id,
+    receiptCode: receipt.code,
+    bankSerialNo: receipt.bankSerialNo,
+    payerName: receipt.payerName || receipt.counterpartyName || '',
+    receivableCodes: [],
+    allocatedAmount: 0,
+    unrecognizedAmount: amount,
+    occurredAt: receipt.date,
+    postedAt,
+    operator: handler || receipt.handler || '',
+  })
+  account.balance_amount = balanceAfter
+  account.balance_date = String(account.balance_date || '') > String(receipt.date || '')
+    ? account.balance_date
+    : receipt.date
+  account.updated_at = postedAt
+  account.updated_by = handler || receipt.handler || '来款入账'
+
+  receipt.cashBalanceId = account.id
+  receipt.companyName = account.company_name || ''
+  receipt.bankName = account.bank_name || ''
+  receipt.cashBalanceAccountName = cashBalanceDisplayName(account)
+  receipt.accountNo = account.account_no_tail || ''
+  receipt.accountName = cashBalanceDisplayName(account)
+  receipt.openingBalance = balanceBefore
+  receipt.currentBalance = balanceAfter
+  receipt.balancePostedAmount = amount
+  receipt.balancePostedAt = postedAt
+  receipt.balancePostingId = `receipt-posting-${receipt.id}`
+  return account
+}
+
 function validateReceiptInput(input: RegisterReceiptInput) {
   if (!String(input.accountName || '').trim())
     throw new Error('收款账户不能为空')
@@ -248,6 +352,9 @@ function paymentFingerprint(input: CreatePaymentInstructionInput) {
     .sort((a, b) => a.payableId.localeCompare(b.payableId))
   return JSON.stringify({
     paymentRequestNo: String(input.paymentRequestNo).trim(),
+    cashBalanceId: String(input.cashBalanceId || '').trim(),
+    companyName: String(input.companyName || '').trim(),
+    accountNo: String(input.accountNo || '').trim(),
     accountName: String(input.accountName).trim(),
     paymentDate: dateOnly(input.paymentDate),
     payeeName: String(input.payeeName).trim(),
@@ -587,6 +694,10 @@ export const oaModuleStore = {
       throw new Error('OA 数据分区不合法')
     if (!Array.isArray(rows))
       throw new Error('OA 分区数据必须为数组')
+    if (partition === 'salary') {
+      const currentState = await oaModuleStore.getState()
+      assertSalaryPartitionUpdate(currentState.modules.salary, rows as Array<Record<string, any>>)
+    }
     const db = getMysqlPool()
     if (!db) {
       if (expectedRevision !== memoryRevision)
@@ -625,19 +736,37 @@ export const oaModuleStore = {
   async registerReceipt(input: RegisterReceiptInput) {
     const state = await this.getState()
     const receipt = addReceiptToState(state, input)
+    if (input.cashBalanceId)
+      postReceiptToCashBalance(state, receipt, input.cashBalanceId, input.handler)
     await this.replaceState(state)
     return cloneValue(receipt)
   },
 
-  async allocateReceipt(receiptId: string, allocations: ReceiptAllocationInput[]) {
+  async allocateReceipt(receiptId: string, input: AllocateReceiptInput) {
+    const allocations = input?.allocations
     if (!Array.isArray(allocations) || allocations.length === 0)
       throw new Error('至少选择一张应收单进行核销')
+    if (!String(input.cashBalanceId || '').trim())
+      throw new Error('请选择核销对应的收款账户')
+    if (!String(input.allocationBatchId || '').trim())
+      throw new Error('核销批次号不能为空')
     const state = await this.getState()
     const receipt = state.modules.cash.find(row => String(row.id) === String(receiptId))
     if (!receipt || receipt.flowType !== '来款登记')
       throw new Error('来款记录不存在')
     if (receipt.status === '作废')
       throw new Error('作废来款不能核销')
+    const priorBatch = (Array.isArray(receipt.allocationBatches) ? receipt.allocationBatches : [])
+      .find((item: any) => String(item.id) === String(input.allocationBatchId))
+    if (priorBatch) {
+      return {
+        receipt: cloneValue(receipt),
+        receivables: cloneValue(state.modules.receivable.filter(row =>
+          (priorBatch.receivableIds || []).some((id: string) => String(id) === String(row.id)),
+        )),
+        cashBalance: cloneValue(state.cashBalanceRecords.find(row => String(row.id) === String(receipt.cashBalanceId))),
+      }
+    }
 
     const allocationTotal = allocations.reduce((total, item) => total + Number(item.amount || 0), 0)
     if (allocations.some(item => !Number.isFinite(Number(item.amount)) || Number(item.amount) <= 0))
@@ -655,6 +784,7 @@ export const oaModuleStore = {
     })
 
     const timestamp = now()
+    const cashBalance = postReceiptToCashBalance(state, receipt, input.cashBalanceId, input.handler)
     receipt.allocations = Array.isArray(receipt.allocations) ? receipt.allocations : []
     for (const { allocation, receivable } of resolved) {
       const amount = Number(Number(allocation.amount).toFixed(2))
@@ -667,14 +797,40 @@ export const oaModuleStore = {
         receivableCode: receivable.code,
         amount,
         remark: allocation.remark || '',
+        allocationBatchId: input.allocationBatchId,
+        cashBalanceId: cashBalance.id,
+        cashBalanceAccountName: cashBalanceDisplayName(cashBalance),
+        accountNo: cashBalance.account_no_tail || '',
         allocatedAt: timestamp,
+        allocatedBy: input.handler || '',
       })
     }
     receipt.recognizedAmount = Number((Number(receipt.recognizedAmount || 0) + allocationTotal).toFixed(2))
     receipt.unrecognizedAmount = Number(Math.max(0, Number(receipt.incomeAmount || 0) - receipt.recognizedAmount).toFixed(2))
     receipt.status = receiptStatus(receipt.recognizedAmount, Number(receipt.incomeAmount || 0))
+    receipt.allocationBatches = Array.isArray(receipt.allocationBatches) ? receipt.allocationBatches : []
+    receipt.allocationBatches.push({
+      id: input.allocationBatchId,
+      cashBalanceId: cashBalance.id,
+      amount: Number(allocationTotal.toFixed(2)),
+      receivableIds: resolved.map(item => String(item.receivable.id)),
+      receivableCodes: resolved.map(item => String(item.receivable.code || item.receivable.id)),
+      allocatedAt: timestamp,
+      allocatedBy: input.handler || '',
+    })
+    const balanceMovement = (cashBalance.balanceMovements || [])
+      .find((item: any) => item.type === 'RECEIPT' && String(item.receiptId) === String(receipt.id))
+    if (balanceMovement) {
+      balanceMovement.receivableCodes = [...new Set(receipt.allocations.map((item: any) => item.receivableCode).filter(Boolean))]
+      balanceMovement.allocatedAmount = receipt.recognizedAmount
+      balanceMovement.unrecognizedAmount = receipt.unrecognizedAmount
+    }
     await this.replaceState(state)
-    return { receipt: cloneValue(receipt), receivables: cloneValue(resolved.map(item => item.receivable)) }
+    return {
+      receipt: cloneValue(receipt),
+      receivables: cloneValue(resolved.map(item => item.receivable)),
+      cashBalance: cloneValue(cashBalance),
+    }
   },
 
   async createPaymentInstruction(input: CreatePaymentInstructionInput) {
@@ -702,6 +858,20 @@ export const oaModuleStore = {
       return { allocation, payable }
     })
     const amount = Number(resolved.reduce((total, item) => total + Number(item.allocation.amount), 0).toFixed(2))
+    const cashBalance = input.cashBalanceId
+      ? state.cashBalanceRecords.find(row => String(row.id) === String(input.cashBalanceId))
+      : undefined
+    if (input.cashBalanceId && !cashBalance)
+      throw new Error('所选现金余额账户不存在')
+    if (cashBalance && String(cashBalance.company_name) !== String(input.companyName || '').trim())
+      throw new Error('付款主体与现金余额账户不匹配')
+    if (cashBalance && String(cashBalance.account_no_tail) !== String(input.accountNo || '').trim())
+      throw new Error('付款账号与现金余额账户不匹配')
+    const reservedCashBalance = pendingPayments
+      .filter(row => String(row.cashBalanceId || '') === String(input.cashBalanceId || ''))
+      .reduce((total, row) => total + Number(row.paymentAmount || 0), 0)
+    if (cashBalance && amount > Number(cashBalance.balance_amount || 0) - reservedCashBalance + 0.00001)
+      throw new Error('付款账号可用余额不足')
     const paymentDate = dateOnly(input.paymentDate)!
     const latestAccountFlow = state.modules.cash
       .filter(row => row.accountName === input.accountName && !unsettledPaymentStatuses.includes(row.paymentStatus))
@@ -710,6 +880,9 @@ export const oaModuleStore = {
     const payment = {
       id: `payment-${requestNo}`,
       code: `PMT-${requestNo}`,
+      cashBalanceId: input.cashBalanceId,
+      companyName: String(input.companyName || '').trim(),
+      accountNo: String(input.accountNo || '').trim(),
       accountName: String(input.accountName).trim(),
       accountType: input.accountType || '银行账户',
       openingBalance,
@@ -801,6 +974,13 @@ export const oaModuleStore = {
       .sort((a, b) => String(b.date).localeCompare(String(a.date)))[0]
     const priorBalance = Number(priorFlow?.currentBalance || payment.openingBalance || 0)
     const paymentAmount = Number(payment.paymentAmount || 0)
+    const cashBalance = payment.cashBalanceId
+      ? state.cashBalanceRecords.find(row => String(row.id) === String(payment.cashBalanceId))
+      : undefined
+    if (payment.cashBalanceId && !cashBalance)
+      throw new Error('付款关联的现金余额账户不存在')
+    if (cashBalance && Number(cashBalance.balance_amount || 0) < paymentAmount)
+      throw new Error('付款账号余额不足')
     if (priorFlow && priorBalance < paymentAmount)
       throw new Error('付款账户余额不足')
 
@@ -817,6 +997,11 @@ export const oaModuleStore = {
     payment.status = '已支付'
     payment.handler = input.handler || payment.handler
     payment.paidAt = input.paidAt || now()
+    if (cashBalance) {
+      cashBalance.balance_amount = Number((Number(cashBalance.balance_amount || 0) - paymentAmount).toFixed(2))
+      cashBalance.updated_at = now()
+      cashBalance.updated_by = input.handler || payment.handler || '付款确认'
+    }
     await this.replaceState(state)
     return { payment: cloneValue(payment), payables: cloneValue(resolved.map(item => item.payable)) }
   },
@@ -919,6 +1104,25 @@ export async function updateApprovalRecord(instance: ApprovalInstance, status: s
     record.status = moduleKey === 'salary'
       ? ({ 审批中: '待审批', 已确认: '审批通过', 已驳回: '审批驳回', 已撤回: '草稿' } as Record<string, string>)[status]
       : status
+
+    if (moduleKey === 'receivable' && instance.businessType === 'payment') {
+      const amount = Number(instance.amount || form.amount || 0)
+      const billDate = String(form.paymentDate || form.occurredDate || form.billDate || instance.submittedAt).slice(0, 10)
+      Object.assign(record, {
+        ...form,
+        counterparty: approvalCounterparty(instance, form),
+        billType: '应付',
+        amount,
+        paidAmount: Number(record.paidAmount || 0),
+        unpaidAmount: Math.max(0, amount - Number(record.paidAmount || 0)),
+        dueDate: billDate,
+        date: billDate,
+        status: status === '已确认' ? (Number(record.paidAmount || 0) > 0 ? '部分付款' : '未付') : status,
+        financialYear: new Date(billDate).getFullYear(),
+        financialMonth: new Date(billDate).getMonth() + 1,
+        remark: form.remark || form.description || instance.title,
+      })
+    }
   }
 
   if (createsSettlement) {
@@ -958,7 +1162,19 @@ export async function updateApprovalRecord(instance: ApprovalInstance, status: s
         sourceBusinessId: instance.businessId,
         financialYear: new Date(billDate).getFullYear(),
         financialMonth: new Date(billDate).getMonth() + 1,
-        remark: form.description || form.remark || instance.title,
+        paymentMethod: form.paymentMethod,
+        paymentDate: form.paymentDate,
+        receivingAccount: form.receivingAccount,
+        accountType: form.accountType,
+        accountName: form.accountName,
+        accountNumber: form.accountNumber,
+        bankName: form.bankName,
+        bankProvince: form.bankProvince,
+        bankCity: form.bankCity,
+        bankBranchName: form.bankBranchName,
+        attachmentFiles: form.attachmentFiles,
+        attachmentName: form.attachmentName,
+        remark: form.remark || form.description || instance.title,
       }
       if (existing)
         Object.assign(existing, settlement)

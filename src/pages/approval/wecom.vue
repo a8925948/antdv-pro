@@ -19,6 +19,8 @@ const loading = ref(false)
 const saving = ref(false)
 const testing = ref(false)
 const batchSyncing = ref(false)
+const mappingSaving = ref(false)
+const syncSaving = ref(false)
 const mappingOpen = ref(false)
 const syncOpen = ref(false)
 const mappings = ref<any[]>([])
@@ -87,11 +89,19 @@ async function saveConfig() {
 async function testConnection() {
   testing.value = true
   try {
-    await testWecomApprovalConnectionApi()
+    const result = await testWecomApprovalConnectionApi()
+    if (result?.code !== 200 || result.data !== true)
+      throw new Error(result?.msg || '连接失败')
     message.success('连接成功，企业 ID 与 Secret 有效')
   }
   catch (error: any) {
-    message.error(error?.message || '连接失败')
+    const responseMessage = error?.response?.data?.msg
+    const errorMessage = typeof responseMessage === 'string'
+      ? responseMessage
+      : typeof error?.message === 'string'
+        ? error.message
+        : '连接失败，请稍后重试'
+    message.error(errorMessage)
   }
   finally {
     testing.value = false
@@ -111,10 +121,21 @@ function handleBusinessTypeChange(businessType: unknown) {
 async function submitMapping() {
   if (!mapping.businessType || !mapping.templateId)
     return message.warning('请填写业务类型和企业微信模板 ID')
-  await saveWecomApprovalMappingApi(mapping)
-  mappingOpen.value = false
-  message.success('模板映射已保存')
-  await loadData()
+  if (mappingSaving.value)
+    return
+  mappingSaving.value = true
+  try {
+    await saveWecomApprovalMappingApi(mapping)
+    mappingOpen.value = false
+    message.success('模板映射已保存')
+    await loadData()
+  }
+  catch (error: any) {
+    message.error(error?.message || '模板映射保存失败')
+  }
+  finally {
+    mappingSaving.value = false
+  }
 }
 
 async function removeMapping(id: string) {
@@ -126,12 +147,25 @@ async function removeMapping(id: string) {
 async function syncApproval() {
   if (!syncForm.spNo.trim())
     return message.warning('请输入企业微信审批单号')
-  await syncWecomApprovalApi(syncForm.spNo, syncForm.localInstanceId)
-  syncOpen.value = false
-  syncForm.spNo = ''
-  syncForm.localInstanceId = undefined
-  message.success('审批状态已同步')
-  await loadData()
+  if (syncSaving.value)
+    return
+  syncSaving.value = true
+  try {
+    const result = await syncWecomApprovalApi(syncForm.spNo, syncForm.localInstanceId)
+    if (result.code !== 200)
+      throw new Error(result.msg || '同步失败')
+    syncOpen.value = false
+    syncForm.spNo = ''
+    syncForm.localInstanceId = undefined
+    message.success('审批状态已同步')
+    await loadData()
+  }
+  catch (error: any) {
+    message.error(error?.message || '同步失败')
+  }
+  finally {
+    syncSaving.value = false
+  }
 }
 
 async function syncRange(days?: number) {
@@ -360,7 +394,7 @@ onMounted(loadData)
       </a-table>
     </a-card>
 
-    <a-modal v-model:open="mappingOpen" title="模板映射" ok-text="保存" @ok="submitMapping">
+    <a-modal v-model:open="mappingOpen" title="模板映射" ok-text="保存" :confirm-loading="mappingSaving" :mask-closable="false" :closable="!mappingSaving" :keyboard="!mappingSaving" :cancel-button-props="{ disabled: mappingSaving }" @ok="submitMapping">
       <a-form layout="vertical">
         <a-form-item label="审批中心业务类型" required>
           <a-select v-model:value="mapping.businessType" show-search option-filter-prop="label" placeholder="选择对应业务" @change="handleBusinessTypeChange">
@@ -415,7 +449,7 @@ onMounted(loadData)
         </a-form-item>
       </a-form>
     </a-modal>
-    <a-modal v-model:open="syncOpen" title="按审批单号同步" ok-text="立即同步" @ok="syncApproval">
+    <a-modal v-model:open="syncOpen" title="按审批单号同步" ok-text="立即同步" :confirm-loading="syncSaving" :mask-closable="false" :closable="!syncSaving" :keyboard="!syncSaving" :cancel-button-props="{ disabled: syncSaving }" @ok="syncApproval">
       <a-form layout="vertical">
         <a-form-item label="企业微信审批单号" required>
           <a-input v-model:value="syncForm.spNo" placeholder="例如 202607130001" />

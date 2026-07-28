@@ -1,4 +1,4 @@
-FROM nginx:1.27-alpine
+FROM docker.m.daocloud.io/library/nginx:1.27-alpine
 
 LABEL maintainer="enterprise-system"
 

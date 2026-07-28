@@ -1016,6 +1016,14 @@ export const approvalStore = {
         operatorName: '企业微信',
         comment: `企业微信审批同步：${externalStatusText[payload.status] || payload.status}（${payload.externalKey}）`,
       })
+      if (payload.status === 'APPROVED')
+        await dispatchApprovalBusinessCallback('approved', instance)
+      else if (payload.status === 'REJECTED')
+        await dispatchApprovalBusinessCallback('rejected', instance)
+      else if (['REVOKED', 'CANCELED'].includes(payload.status))
+        await dispatchApprovalBusinessCallback('revoked', instance)
+      else
+        await dispatchApprovalBusinessCallback('pending', instance)
       return getDetailSync(instance.id)
     })
   },
@@ -1240,7 +1248,7 @@ export const approvalStore = {
     const instance = state.instances.find(item => item.businessType === businessType && item.businessId === businessId && !item.payload?.archivedAt)
     return instance ? getDetailSync(instance.id) : null
   },
-  async applyExternalStatus(instanceId: string, status: ApprovalStatus, source: string, reference: string) {
+  async applyExternalStatus(instanceId: string, status: ApprovalStatus, source: string, reference: string, formData?: Record<string, any>) {
     return transaction(async () => {
       const instance = getInstanceSync(instanceId)
       const allowed: ApprovalStatus[] = ['PENDING', 'APPROVING', 'APPROVED', 'REJECTED', 'REVOKED', 'CANCELED']
@@ -1249,6 +1257,18 @@ export const approvalStore = {
 
       instance.status = status
       instance.updatedAt = now()
+      if (formData) {
+        const archiveMetadata = instance.payload?.archivedAt
+          ? {
+              archivedAt: instance.payload.archivedAt,
+              archivedBy: instance.payload.archivedBy,
+              archivedById: instance.payload.archivedById,
+              archiveReason: instance.payload.archiveReason,
+            }
+          : {}
+        instance.formSnapshot = formData
+        instance.payload = { ...formData, ...archiveMetadata }
+      }
       if (status === 'APPROVED') {
         instance.businessStatus = 'APPROVAL_APPROVED'
         instance.approvedAt = now()

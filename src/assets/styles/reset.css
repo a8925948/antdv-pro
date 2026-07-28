@@ -1,10 +1,13 @@
 @import './motion.css';
 html {
   --admin-primary: #1677ff;
+  --admin-primary-text: #0958d9;
   --admin-success: #16a34a;
+  --admin-success-text: #15803d;
   --admin-warning: #d97706;
+  --admin-warning-strong: #9a4f05;
   --admin-danger: #dc2626;
-  --admin-muted: #64748b;
+  --admin-muted: #526277;
   --admin-text: #0f172a;
   --admin-text-secondary: #475569;
   --admin-text-tertiary: #94a3b8;
@@ -24,12 +27,17 @@ html {
   --hover-color: rgba(0, 0, 0, 0.025);
   --bg-color-container: var(--admin-page-bg);
   --c-shadow: 2px 0 8px 0 rgba(29, 35, 41, 0.05);
+  max-width: 100%;
+  overflow-x: hidden;
 }
 
 html.dark {
   --admin-primary: #69b1ff;
+  --admin-primary-text: #91caff;
   --admin-success: #4ade80;
+  --admin-success-text: #86efac;
   --admin-warning: #fbbf24;
+  --admin-warning-strong: #fbbf24;
   --admin-danger: #f87171;
   --admin-muted: #94a3b8;
   --admin-text: rgba(229, 224, 216, 0.92);
@@ -56,6 +64,7 @@ body {
   background-color: var(--admin-page-bg);
   text-rendering: optimizeLegibility;
   overflow: hidden;
+  padding: 0;
 }
 
 #app,
@@ -195,8 +204,20 @@ button:focus-visible,
 .pro-ant-multi-tab .ant-tabs-tab:focus-visible,
 .pro-ant-multi-tab .ant-tabs-tab-btn:focus,
 .pro-ant-multi-tab .ant-tabs-tab-btn:focus-visible {
-  outline: 0 !important;
-  box-shadow: inset 0 0 0 1px rgb(22 119 255 / 45%) !important;
+  outline: 2px solid var(--admin-primary) !important;
+  outline-offset: 2px;
+  box-shadow: none !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+  }
 }
 
 .pro-ant-multi-tab .ant-tabs-tab-active {
@@ -226,7 +247,7 @@ button:focus-visible,
 }
 
 .ant-btn {
-  min-height: 34px;
+  min-height: 36px;
   border-radius: 6px;
   font-weight: 500;
   transition:
@@ -234,6 +255,18 @@ button:focus-visible,
     background-color 0.18s ease,
     box-shadow 0.18s ease,
     color 0.18s ease;
+}
+
+@media (pointer: coarse) {
+  .ant-btn,
+  .ant-input,
+  .ant-input-affix-wrapper,
+  .ant-picker,
+  .ant-select-selector,
+  .ant-input-number,
+  .ant-checkbox-wrapper {
+    min-height: 44px;
+  }
 }
 
 .ant-btn-primary {
@@ -444,6 +477,10 @@ button:focus-visible,
   scrollbar-gutter: stable;
 }
 
+.ant-table-wrapper table {
+  table-layout: auto !important;
+}
+
 .ant-table-wrapper .ant-table-content::-webkit-scrollbar,
 .ant-table-wrapper .ant-table-body::-webkit-scrollbar {
   width: 12px;
@@ -470,7 +507,8 @@ button:focus-visible,
   line-height: 1.35;
   background: var(--admin-surface-muted);
   border-bottom: 1px solid var(--admin-border);
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 
 .ant-table-wrapper .ant-table-tbody > tr > td {
@@ -544,20 +582,21 @@ html.dark .ant-table-wrapper .ant-table-cell-fix-right {
 }
 
 .ant-table-wrapper .table-cell-number,
-.ant-table-wrapper .table-cell-money {
+.ant-table-wrapper .table-cell-money,
+.ant-table-wrapper .table-cell-date,
+.ant-table-wrapper .table-cell-status,
+.ant-table-wrapper .table-cell-action {
   font-variant-numeric: tabular-nums;
-  text-align: right;
   white-space: nowrap;
 }
 
-.ant-table-wrapper .table-cell-date {
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
+.ant-table-wrapper .table-cell-number,
+.ant-table-wrapper .table-cell-money {
+  text-align: right;
 }
 
 .ant-table-wrapper .table-cell-action {
   text-align: center;
-  white-space: nowrap;
 }
 
 .ant-table-wrapper .table-cell-action .ant-space {
@@ -573,14 +612,39 @@ html.dark .ant-table-wrapper .ant-table-cell-fix-right {
   color: rgb(148 163 184);
 }
 
+.ant-table-wrapper .ant-table-cell-ellipsis,
+.ant-table-wrapper .ant-table-cell-ellipsis .ant-table-column-title,
 .ant-table-wrapper .cell-ellipsis {
-  display: inline-block;
-  width: 100%;
+  overflow: visible !important;
+  overflow-wrap: anywhere;
+  text-overflow: clip !important;
+  white-space: normal !important;
+  word-break: break-word;
+}
+
+.ant-table-wrapper .cell-ellipsis {
+  display: block;
+  width: auto;
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
   vertical-align: bottom;
+}
+
+.ant-table-wrapper .vehicle-link span,
+.ant-table-wrapper .table-stack strong,
+.ant-table-wrapper .table-stack span,
+.ant-table-wrapper .table-stack small,
+.ant-table-wrapper .driver-name-cell strong,
+.ant-table-wrapper .attendance-person-line strong,
+.ant-table-wrapper .order-location-link span,
+.ant-table-wrapper .order-location-link small {
+  max-width: none !important;
+  overflow: visible !important;
+  overflow-wrap: anywhere;
+  text-overflow: clip !important;
+  white-space: normal !important;
+  word-break: break-word;
 }
 
 @media (max-width: 768px) {

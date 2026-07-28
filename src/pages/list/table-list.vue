@@ -320,7 +320,7 @@ const expand = ref(false)
           </a-col>
           <a-col :span="8">
             <a-form-item name="callNo" label="服务调用次数">
-              <a-input-number v-model:value="formModel.callNo" style="width: 100%" />
+              <business-input-number v-model:value="formModel.callNo" style="width: 100%" />
             </a-form-item>
           </a-col>
         </a-row>

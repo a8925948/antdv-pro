@@ -276,6 +276,7 @@ CREATE TABLE IF NOT EXISTS office_vehicle_insurance (
   start_date DATE NOT NULL,
   end_date DATE NOT NULL,
   attachment_name VARCHAR(255) NULL,
+  attachment_url VARCHAR(512) NULL,
   status VARCHAR(32) NOT NULL DEFAULT '有效',
   remark VARCHAR(512) NULL,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,

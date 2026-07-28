@@ -7,7 +7,8 @@ export function useTransportImportState() {
   const batchFilePickerKind = ref<'fuel' | 'etc'>('etc')
   return {
     importPreview: reactive<ImportConfirmState>(createImportConfirmState()),
-    pendingImportApply: shallowRef<(rows: Array<Record<string, string>>) => void>(),
+    pendingImportApply: shallowRef<(rows: Array<Record<string, string>>) => void | Promise<void>>(),
+    pendingImportPersist: ref(true),
     batchFilePickerOpen: ref(false),
     batchFilePickerKind,
     batchSelectedFiles: ref<File[]>([]),

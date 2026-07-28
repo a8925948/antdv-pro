@@ -104,6 +104,7 @@ export interface OfficeVehicleInsurance {
   startDate: string
   endDate: string
   attachmentName?: string
+  attachmentUrl?: string
   status: LicenseStatus
   remark?: string
   createdBy?: string | number
@@ -153,6 +154,7 @@ export interface OfficeVehicleQuery extends OperatorContext {
   plateNo?: string
   expenseType?: string
   licenseType?: string
+  insuranceType?: string
   reminderType?: string
   departmentName?: string
   status?: string
@@ -160,6 +162,19 @@ export interface OfficeVehicleQuery extends OperatorContext {
   endDate?: string
   financialYear?: number | string
   financialMonth?: number | string
+}
+
+export interface OfficeVehicleBatchSavePayload {
+  vehicle: Partial<OfficeVehicle>
+  expenses?: Array<Partial<OfficeVehicleExpense>>
+  licenses?: Array<Partial<OfficeVehicleLicense>>
+  insurances?: Array<Partial<OfficeVehicleInsurance>>
+  reminders?: Array<Partial<OfficeVehicleReminder>>
+}
+
+interface MutationOptions {
+  hydrate?: boolean
+  persist?: boolean
 }
 
 interface OfficeVehicleState {
@@ -238,6 +253,25 @@ if (!globalStore.__officeVehicleState) {
 
 const state = globalStore.__officeVehicleState as OfficeVehicleState
 let regulatoryVehicleSyncQueue: Promise<void> = Promise.resolve()
+
+function snapshotState() {
+  return structuredClone(state) as OfficeVehicleState
+}
+
+function restoreState(snapshot: OfficeVehicleState) {
+  state.vehicles = snapshot.vehicles
+  state.expenses = snapshot.expenses
+  state.licenses = snapshot.licenses
+  state.insurances = snapshot.insurances
+  state.reminders = snapshot.reminders
+  state.logs = snapshot.logs
+  state.seq = snapshot.seq
+}
+
+function batchItemError(label: string, index: number, error: unknown) {
+  const reason = error instanceof Error ? error.message : '保存失败'
+  return new Error(`${label}第 ${index + 1} 条：${reason}`)
+}
 
 function nextId(prefix: string) {
   state.seq += 1
@@ -358,6 +392,7 @@ async function ensureOfficeVehicleSchema(db: mysql.Pool) {
       start_date DATE NOT NULL,
       end_date DATE NOT NULL,
       attachment_name VARCHAR(255) NULL,
+      attachment_url VARCHAR(512) NULL,
       status VARCHAR(32) NOT NULL DEFAULT '有效',
       remark VARCHAR(512) NULL,
       created_by VARCHAR(64) NULL,
@@ -409,6 +444,7 @@ async function ensureOfficeVehicleSchema(db: mysql.Pool) {
     ensureColumn(db, 'office_vehicle', 'created_by', 'VARCHAR(64) NULL'),
     ensureColumn(db, 'office_vehicle_expense', 'created_by', 'VARCHAR(64) NULL'),
     ensureColumn(db, 'office_vehicle_license', 'created_by', 'VARCHAR(64) NULL'),
+    ensureColumn(db, 'office_vehicle_insurance', 'attachment_url', 'VARCHAR(512) NULL'),
     ensureColumn(db, 'office_vehicle_insurance', 'created_by', 'VARCHAR(64) NULL'),
     ensureColumn(db, 'office_vehicle_reminder', 'created_by', 'VARCHAR(64) NULL'),
   ])
@@ -514,6 +550,7 @@ async function loadOfficeVehicleStateFromMysql() {
     startDate: formatDate(row.start_date) || '',
     endDate: formatDate(row.end_date) || '',
     attachmentName: row.attachment_name || undefined,
+    attachmentUrl: row.attachment_url || undefined,
     status: row.status,
     remark: row.remark || undefined,
     createdBy: row.created_by || undefined,
@@ -586,10 +623,10 @@ async function writeOfficeVehicleState(db: mysql.Pool | mysql.PoolConnection) {
   }
   for (const item of state.insurances) {
     await db.execute(`
-      INSERT INTO office_vehicle_insurance (id, vehicle_id, plate_no, insurance_type, policy_no, insurer, amount, start_date, end_date, attachment_name, status, remark, created_by, created_at, updated_at, deleted_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON DUPLICATE KEY UPDATE vehicle_id=VALUES(vehicle_id), plate_no=VALUES(plate_no), insurance_type=VALUES(insurance_type), policy_no=VALUES(policy_no), insurer=VALUES(insurer), amount=VALUES(amount), start_date=VALUES(start_date), end_date=VALUES(end_date), attachment_name=VALUES(attachment_name), status=VALUES(status), remark=VALUES(remark), created_by=COALESCE(created_by, VALUES(created_by)), updated_at=VALUES(updated_at), deleted_at=VALUES(deleted_at)
-    `, [item.id, item.vehicleId, item.plateNo, item.insuranceType, item.policyNo, item.insurer, item.amount, item.startDate, item.endDate, item.attachmentName || null, item.status, item.remark || null, item.createdBy == null ? null : String(item.createdBy), item.createdAt, item.updatedAt, item.deletedAt || null])
+      INSERT INTO office_vehicle_insurance (id, vehicle_id, plate_no, insurance_type, policy_no, insurer, amount, start_date, end_date, attachment_name, attachment_url, status, remark, created_by, created_at, updated_at, deleted_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON DUPLICATE KEY UPDATE vehicle_id=VALUES(vehicle_id), plate_no=VALUES(plate_no), insurance_type=VALUES(insurance_type), policy_no=VALUES(policy_no), insurer=VALUES(insurer), amount=VALUES(amount), start_date=VALUES(start_date), end_date=VALUES(end_date), attachment_name=VALUES(attachment_name), attachment_url=VALUES(attachment_url), status=VALUES(status), remark=VALUES(remark), created_by=COALESCE(created_by, VALUES(created_by)), updated_at=VALUES(updated_at), deleted_at=VALUES(deleted_at)
+    `, [item.id, item.vehicleId, item.plateNo, item.insuranceType, item.policyNo, item.insurer, item.amount, item.startDate, item.endDate, item.attachmentName || null, item.attachmentUrl || null, item.status, item.remark || null, item.createdBy == null ? null : String(item.createdBy), item.createdAt, item.updatedAt, item.deletedAt || null])
   }
   for (const item of state.reminders) {
     await db.execute(`
@@ -867,7 +904,10 @@ export const officeVehicleStore = {
       .map(item => ({
         ...presentRecord('vehicle', item, query),
         monthExpense: state.expenses.filter(expense => !expense.deletedAt && expense.vehicleId === item.id && inRange(expense.occurredDate, query)).reduce((sum, expense) => sum + Number(expense.amount || 0), 0),
-        riskCount: state.reminders.filter(reminder => !reminder.deletedAt && reminder.vehicleId === item.id && ['即将到期', '已过期'].includes(reminder.status)).length,
+        riskCount: [
+          ...state.licenses.filter(record => !record.deletedAt && record.vehicleId === item.id),
+          ...state.insurances.filter(record => !record.deletedAt && record.vehicleId === item.id),
+        ].filter(record => ['即将到期', '已过期'].includes(record.status || '')).length,
       }))
     return page(records, query)
   },
@@ -886,9 +926,10 @@ export const officeVehicleStore = {
       logs: state.logs.filter(item => item.recordId === id || [item.recordId].includes(id)),
     }
   },
-  async saveVehicle(payload: Partial<OfficeVehicle>, context: OperatorContext = {}) {
+  async saveVehicle(payload: Partial<OfficeVehicle>, context: OperatorContext = {}, options: MutationOptions = {}) {
     payload = withoutRecordPermissions(payload as Record<string, any>)
-    await hydrateOfficeVehicleState()
+    if (options.hydrate !== false)
+      await hydrateOfficeVehicleState()
     assertOfficeAdmin(context)
     if (!payload.plateNo?.trim())
       throw new Error('车牌号不能为空')
@@ -905,7 +946,8 @@ export const officeVehicleStore = {
         throw new Error('车辆不存在')
       state.vehicles[index] = { ...state.vehicles[index], ...payload, plateNo: normalizedPlateNo, updatedAt: now() } as OfficeVehicle
       addLog('vehicle', payload.id, 'UPDATE', `编辑车辆 ${normalizedPlateNo}`, context)
-      await persist()
+      if (options.persist !== false)
+        await persist()
       return state.vehicles[index]
     }
     const record: OfficeVehicle = {
@@ -929,8 +971,66 @@ export const officeVehicleStore = {
     }
     state.vehicles.unshift(record)
     addLog('vehicle', record.id, 'CREATE', `新增车辆 ${record.plateNo}`, context)
-    await persist()
+    if (options.persist !== false)
+      await persist()
     return presentRecord('vehicle', record, context)
+  },
+  async saveBatch(payload: OfficeVehicleBatchSavePayload, context: OperatorContext = {}) {
+    await hydrateOfficeVehicleState()
+    assertOfficeAdmin(context)
+    if (!payload?.vehicle)
+      throw new Error('请填写车辆基础资料')
+
+    const snapshot = snapshotState()
+    const deferred: MutationOptions = { hydrate: false, persist: false }
+    try {
+      const vehicle = await this.saveVehicle(payload.vehicle, context, deferred)
+      const vehicleId = vehicle.id
+      const expenses: OfficeVehicleExpense[] = []
+      const licenses: OfficeVehicleLicense[] = []
+      const insurances: OfficeVehicleInsurance[] = []
+      const reminders: OfficeVehicleReminder[] = []
+
+      for (const [index, item] of (payload.expenses || []).entries()) {
+        try {
+          expenses.push(await this.saveExpense({ ...item, vehicleId }, context, deferred))
+        }
+        catch (error) {
+          throw batchItemError('费用', index, error)
+        }
+      }
+      for (const [index, item] of (payload.licenses || []).entries()) {
+        try {
+          licenses.push(await this.saveLicense({ ...item, vehicleId }, context, deferred))
+        }
+        catch (error) {
+          throw batchItemError('证照', index, error)
+        }
+      }
+      for (const [index, item] of (payload.insurances || []).entries()) {
+        try {
+          insurances.push(await this.saveInsurance({ ...item, vehicleId }, context, deferred))
+        }
+        catch (error) {
+          throw batchItemError('保险', index, error)
+        }
+      }
+      for (const [index, item] of (payload.reminders || []).entries()) {
+        try {
+          reminders.push(await this.saveReminder({ ...item, vehicleId }, context, deferred))
+        }
+        catch (error) {
+          throw batchItemError('到期事项', index, error)
+        }
+      }
+
+      await persist()
+      return { vehicle, expenses, licenses, insurances, reminders }
+    }
+    catch (error) {
+      restoreState(snapshot)
+      throw error
+    }
   },
   async deleteVehicle(id: string, context: OperatorContext = {}) {
     await hydrateOfficeVehicleState()
@@ -961,9 +1061,10 @@ export const officeVehicleStore = {
       .sort((a, b) => dayjs(b.occurredDate).valueOf() - dayjs(a.occurredDate).valueOf())
     return page(records.map(item => presentRecord('expense', item, query)), query)
   },
-  async saveExpense(payload: Partial<OfficeVehicleExpense>, context: OperatorContext = {}) {
+  async saveExpense(payload: Partial<OfficeVehicleExpense>, context: OperatorContext = {}, options: MutationOptions = {}) {
     payload = withoutRecordPermissions(payload as Record<string, any>)
-    await hydrateOfficeVehicleState()
+    if (options.hydrate !== false)
+      await hydrateOfficeVehicleState()
     assertFinanceOrAdmin(context)
     if (!payload.vehicleId)
       throw new Error('请选择车辆')
@@ -984,7 +1085,8 @@ export const officeVehicleStore = {
         throw new Error('已确认费用不能编辑')
       state.expenses[index] = { ...state.expenses[index], ...payload, plateNo: vehicle.plateNo, approvalStatus, updatedAt: now() } as OfficeVehicleExpense
       addLog('expense', payload.id, 'UPDATE', `编辑费用 ${vehicle.plateNo} ${payload.expenseType}`, context)
-      await persist()
+      if (options.persist !== false)
+        await persist()
       return state.expenses[index]
     }
     const record: OfficeVehicleExpense = {
@@ -1011,7 +1113,8 @@ export const officeVehicleStore = {
     }
     state.expenses.unshift(record)
     addLog('expense', record.id, 'CREATE', `新增费用 ${record.plateNo} ${record.expenseType} ${record.amount} 元`, context)
-    await persist()
+    if (options.persist !== false)
+      await persist()
     return presentRecord('expense', record, context)
   },
   async deleteExpense(id: string, context: OperatorContext = {}) {
@@ -1081,9 +1184,10 @@ export const officeVehicleStore = {
       .filter(item => !query.status || item.status === query.status)
     return page(records.map(item => presentRecord('license', item, query)), query)
   },
-  async saveLicense(payload: Partial<OfficeVehicleLicense>, context: OperatorContext = {}) {
+  async saveLicense(payload: Partial<OfficeVehicleLicense>, context: OperatorContext = {}, options: MutationOptions = {}) {
     payload = withoutRecordPermissions(payload as Record<string, any>)
-    await hydrateOfficeVehicleState()
+    if (options.hydrate !== false)
+      await hydrateOfficeVehicleState()
     assertOfficeAdmin(context)
     if (!payload.vehicleId)
       throw new Error('请选择车辆')
@@ -1103,13 +1207,15 @@ export const officeVehicleStore = {
         throw new Error('证照不存在')
       state.licenses[index] = { ...state.licenses[index], ...base }
       addLog('license', payload.id, 'UPDATE', `编辑证照 ${base.licenseType}`, context)
-      await persist()
+      if (options.persist !== false)
+        await persist()
       return state.licenses[index]
     }
     const record: OfficeVehicleLicense = { ...base, id: nextId('lic'), createdBy: context.userId, createdAt: now() }
     state.licenses.unshift(record)
     addLog('license', record.id, 'CREATE', `上传证照 ${record.licenseType}`, context)
-    await persist()
+    if (options.persist !== false)
+      await persist()
     return record
   },
   async deleteLicense(id: string, context: OperatorContext = {}) {
@@ -1128,12 +1234,17 @@ export const officeVehicleStore = {
     await hydrateOfficeVehicleState()
     refreshStatuses()
     const ids = visibleVehicleIds(query)
-    const records = state.insurances.filter(item => !item.deletedAt && ids.has(item.vehicleId)).filter(item => !query.vehicleId || item.vehicleId === query.vehicleId)
+    const records = state.insurances
+      .filter(item => !item.deletedAt && ids.has(item.vehicleId))
+      .filter(item => !query.vehicleId || item.vehicleId === query.vehicleId)
+      .filter(item => !query.insuranceType || item.insuranceType === query.insuranceType)
+      .filter(item => !query.status || item.status === query.status)
     return page(records.map(item => presentRecord('insurance', item, query)), query)
   },
-  async saveInsurance(payload: Partial<OfficeVehicleInsurance>, context: OperatorContext = {}) {
+  async saveInsurance(payload: Partial<OfficeVehicleInsurance>, context: OperatorContext = {}, options: MutationOptions = {}) {
     payload = withoutRecordPermissions(payload as Record<string, any>)
-    await hydrateOfficeVehicleState()
+    if (options.hydrate !== false)
+      await hydrateOfficeVehicleState()
     assertOfficeAdmin(context)
     if (!payload.vehicleId)
       throw new Error('请选择车辆')
@@ -1156,13 +1267,15 @@ export const officeVehicleStore = {
         throw new Error('保险信息不存在')
       state.insurances[index] = { ...state.insurances[index], ...base }
       addLog('insurance', payload.id, 'UPDATE', `编辑保险 ${base.insuranceType}`, context)
-      await persist()
+      if (options.persist !== false)
+        await persist()
       return state.insurances[index]
     }
     const record: OfficeVehicleInsurance = { ...base, id: nextId('ins'), amount, insurer: payload.insurer || '-', createdBy: context.userId, createdAt: now() }
     state.insurances.unshift(record)
     addLog('insurance', record.id, 'CREATE', `新增保险 ${record.insuranceType}`, context)
-    await persist()
+    if (options.persist !== false)
+      await persist()
     return record
   },
   async listReminders(query: OfficeVehicleQuery = {}) {
@@ -1177,9 +1290,10 @@ export const officeVehicleStore = {
       .sort((a, b) => dayjs(a.dueDate).valueOf() - dayjs(b.dueDate).valueOf())
     return page(records.map(item => presentRecord('reminder', item, query)), query)
   },
-  async saveReminder(payload: Partial<OfficeVehicleReminder>, context: OperatorContext = {}) {
+  async saveReminder(payload: Partial<OfficeVehicleReminder>, context: OperatorContext = {}, options: MutationOptions = {}) {
     payload = withoutRecordPermissions(payload as Record<string, any>)
-    await hydrateOfficeVehicleState()
+    if (options.hydrate !== false)
+      await hydrateOfficeVehicleState()
     assertOfficeAdmin(context)
     if (!payload.vehicleId)
       throw new Error('请选择车辆')
@@ -1214,7 +1328,8 @@ export const officeVehicleStore = {
         throw new Error('到期事项不存在')
       state.reminders[index] = { ...state.reminders[index], ...base }
       addLog('reminder', payload.id, 'UPDATE', `编辑到期事项 ${base.reminderType}`, context)
-      await persist()
+      if (options.persist !== false)
+        await persist()
       return state.reminders[index]
     }
     const record: OfficeVehicleReminder = {
@@ -1226,7 +1341,8 @@ export const officeVehicleStore = {
     }
     state.reminders.unshift(record)
     addLog('reminder', record.id, 'CREATE', `新增到期事项 ${record.plateNo} ${record.reminderType}`, context)
-    await persist()
+    if (options.persist !== false)
+      await persist()
     return record
   },
   async deleteReminder(id: string, context: OperatorContext = {}) {
@@ -1260,7 +1376,9 @@ export const officeVehicleStore = {
     refreshStatuses()
     const vehicles = (await this.listVehicles({ ...query, current: 1, pageSize: 100000 })).records
     const expenses = (await this.listExpenses({ ...query, current: 1, pageSize: 100000 })).records
-    const reminders = (await this.listReminders({ ...query, current: 1, pageSize: 100000 })).records
+    const licenses = (await this.listLicenses({ ...query, current: 1, pageSize: 100000 })).records
+    const insurances = (await this.listInsurances({ ...query, current: 1, pageSize: 100000 })).records
+    const expiryRecords = [...licenses, ...insurances]
     const totalExpense = expenses.reduce((sum, item) => sum + Number(item.amount || 0), 0)
     const approvalTotalAmount = expenses
       .filter(item => ['待审批', '审批中', '已确认'].includes(item.approvalStatus))
@@ -1285,8 +1403,8 @@ export const officeVehicleStore = {
       monthExpense: totalExpense,
       approvalTotalAmount,
       usedAmount,
-      upcomingReminderCount: reminders.filter(item => item.status === '即将到期').length,
-      expiredReminderCount: reminders.filter(item => item.status === '已过期').length,
+      upcomingReminderCount: expiryRecords.filter(item => item.status === '即将到期').length,
+      expiredReminderCount: expiryRecords.filter(item => item.status === '已过期').length,
       confirmedExpense: expenses.filter(item => item.approvalStatus === '已确认').reduce((sum, item) => sum + Number(item.amount || 0), 0),
       pendingExpenseCount: expenses.filter(item => ['待审批', '审批中'].includes(item.approvalStatus)).length,
       byVehicle,

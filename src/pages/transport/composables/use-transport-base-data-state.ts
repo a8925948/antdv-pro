@@ -1,6 +1,6 @@
 export function useTransportBaseDataState() {
   return {
-    activeBaseDataTab: ref('crew'),
+    activeBaseDataTab: ref('company'),
     baseDataModalOpen: ref(false),
     baseDataSubmitting: ref(false),
     baseDataEditingCode: ref(''),

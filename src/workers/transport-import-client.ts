@@ -37,3 +37,8 @@ export function parseTransportWorkbook(file: File) {
 export function extractTransportPdfText(file: File) {
   return runWorker<string>(file, 'pdf-text')
 }
+
+export async function getTransportFileContentHash(file: File) {
+  const digest = await crypto.subtle.digest('SHA-256', await file.arrayBuffer())
+  return [...new Uint8Array(digest)].map(value => value.toString(16).padStart(2, '0')).join('')
+}

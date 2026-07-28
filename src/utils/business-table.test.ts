@@ -23,18 +23,19 @@ describe('business table utilities', () => {
       { title: '操作', dataIndex: 'action', customCell: () => ({ class: 'existing' }) },
     ])
     expect(columns.map(({ width, align, ellipsis }) => ({ width, align, ellipsis }))).toEqual([
-      { width: 128, align: 'right', ellipsis: true },
-      { width: 170, align: 'center', ellipsis: true },
+      { width: 128, align: 'right', ellipsis: false },
+      { width: 170, align: 'center', ellipsis: false },
       { width: 110, align: 'center', ellipsis: false },
       { width: 180, align: 'center', ellipsis: false },
     ])
     expect(columns[0].sorter({ amount: 2 }, { amount: 1 })).toBe(1)
     expect(columns[3].sorter).toBeUndefined()
+    expect(columns[2].customCell()).toEqual({ class: 'table-cell-status' })
     expect(columns[3].customCell()).toEqual({ class: 'existing table-cell-action' })
   })
 
   it('honors overrides and calculates nested scroll widths', () => {
-    const [column] = enhanceBusinessTableColumns([{ title: '自定义', dataIndex: 'score', width: 75, align: 'left', ellipsis: false, sorter: true }], { numberFields: ['score'] })
+    const [column] = enhanceBusinessTableColumns([{ title: '自定义', dataIndex: 'score', width: 75, align: 'left', ellipsis: true, sorter: true }], { numberFields: ['score'] })
     expect(column).toMatchObject({ width: 75, align: 'left', ellipsis: false, sorter: true })
     expect(businessTableCellClass('score', { numberFields: ['score'] })).toBe('table-cell-number')
     expect(createBusinessTableScrollX([{ width: 100 }, { children: [{ width: 120 }, { width: '80px' }] }], 200, 20)).toBe(320)

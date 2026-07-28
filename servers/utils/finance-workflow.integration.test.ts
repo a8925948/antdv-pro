@@ -89,6 +89,16 @@ describe('approval and finance end-to-end workflows', () => {
     const receivable = state.modules.receivable.find(row => row.sourceApprovalId === submitted.instance.id)!
     expect(receivable).toMatchObject({ billType: '应收', amount: 1000, unpaidAmount: 1000, status: '未收' })
 
+    state.cashBalanceRecords.push({
+      id: 'receipt-account',
+      balance_date: '2026-07-16',
+      company_name: '测试主体',
+      bank_name: '建设银行',
+      account_name: '建行一般户',
+      account_no_tail: '1266',
+      balance_amount: 2000,
+    })
+    await oaModuleStore.replaceState(state)
     const receipt = await oaModuleStore.registerReceipt({
       accountName: '建行一般户',
       amount: 1000,
@@ -96,11 +106,17 @@ describe('approval and finance end-to-end workflows', () => {
       payerName: '客户甲',
       bankSerialNo: 'BANK-RC-E2E-1',
     })
-    await oaModuleStore.allocateReceipt(receipt.id, [{ receivableId: receivable.id, amount: 1000 }])
+    await oaModuleStore.allocateReceipt(receipt.id, {
+      cashBalanceId: 'receipt-account',
+      allocationBatchId: 'RA-E2E-1',
+      handler: '财务经理',
+      allocations: [{ receivableId: receivable.id, amount: 1000 }],
+    })
 
     state = await oaModuleStore.getState()
     expect(state.modules.receivable.find(row => row.id === receivable.id)).toMatchObject({ paidAmount: 1000, unpaidAmount: 0, status: '已结清' })
     expect(state.modules.cash.find(row => row.id === receipt.id)).toMatchObject({ incomeAmount: 1000, recognizedAmount: 1000, status: '已核销' })
+    expect(state.cashBalanceRecords.find(row => row.id === 'receipt-account')).toMatchObject({ balance_amount: 3000 })
     expect(calculateFinanceDashboardMetrics(allFinanceRows(state))).toMatchObject({ actualIncome: 1000, outstandingReceivable: 0 })
   })
 })

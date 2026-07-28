@@ -46,7 +46,7 @@ services:
       - enterprise_net
 
   mysql:
-    image: mysql:8.4
+    image: docker.m.daocloud.io/library/mysql:8.4
     restart: unless-stopped
     environment:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?set MYSQL_ROOT_PASSWORD}
@@ -74,7 +74,7 @@ services:
       - enterprise_net
 
   redis:
-    image: redis:7-alpine
+    image: docker.m.daocloud.io/library/redis:7-alpine
     restart: unless-stopped
     command: sh -c "redis-server --appendonly yes --requirepass \"$${REDIS_PASSWORD}\""
     environment:

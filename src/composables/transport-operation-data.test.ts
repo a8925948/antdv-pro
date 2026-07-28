@@ -8,7 +8,6 @@ import {
   saveTransportOperationData,
   syncDriverPayrollFromBaseData,
   syncTransportCustomersFromOrders,
-  syncTransportRoutesFromOrders,
   transportBaseCrewRows,
   transportBaseCustomerRows,
   transportBaseRouteRows,
@@ -232,10 +231,64 @@ describe('transport operation shared data', () => {
     expect(transportOperationError.value).toBe('保存冲突')
   })
 
+  it('rebases unrelated remote changes and retries a stale save', async () => {
+    vi.mocked(fetch).mockReturnValueOnce(apiResponse({
+      code: 200,
+      revision: 'r1',
+      data: { orders: [{ code: 'O-1' }], baseVehicles: [{ code: 'V-1' }] },
+    }))
+    await loadTransportOperationData()
+    transportBaseVehicleRows.value.push({ code: 'V-2' })
+    await nextTick()
+    vi.clearAllTimers()
+
+    vi.mocked(fetch)
+      .mockReturnValueOnce(apiResponse({ code: 400, msg: '数据已被其他用户更新，请刷新后重新录入' }))
+      .mockReturnValueOnce(apiResponse({
+        code: 200,
+        revision: 'r2',
+        data: { orders: [{ code: 'O-1' }, { code: 'O-2' }], baseVehicles: [{ code: 'V-1' }] },
+      }))
+      .mockReturnValueOnce(apiResponse({ code: 200, revision: 'r3' }))
+
+    await saveTransportOperationData()
+
+    expect(fetch).toHaveBeenCalledTimes(4)
+    const retryBody = JSON.parse(vi.mocked(fetch).mock.calls[3][1]?.body as string)
+    expect(retryBody.expectedRevision).toBe('r2')
+    expect(retryBody.orders).toEqual([{ code: 'O-1' }, { code: 'O-2' }])
+    expect(retryBody.baseVehicles).toEqual([{ code: 'V-1' }, { code: 'V-2' }])
+    expect(transportOrderRows.value).toEqual([{ code: 'O-1' }, { code: 'O-2' }])
+  })
+
+  it('does not overwrite a remote change in the same partition', async () => {
+    vi.mocked(fetch).mockReturnValueOnce(apiResponse({
+      code: 200,
+      revision: 'r1',
+      data: { baseVehicles: [{ code: 'V-1', status: '运营中' }] },
+    }))
+    await loadTransportOperationData()
+    transportBaseVehicleRows.value[0].status = '停用'
+    await nextTick()
+    vi.clearAllTimers()
+
+    vi.mocked(fetch)
+      .mockReturnValueOnce(apiResponse({ code: 400, msg: '数据已被其他用户更新，请刷新后重新录入' }))
+      .mockReturnValueOnce(apiResponse({
+        code: 200,
+        revision: 'r2',
+        data: { baseVehicles: [{ code: 'V-1', status: '维修中' }] },
+      }))
+
+    await expect(saveTransportOperationData()).rejects.toThrow('当前模块的数据已被其他用户更新')
+    expect(fetch).toHaveBeenCalledTimes(3)
+  })
+
   it('creates and updates payroll identities from base crew vehicle bindings', () => {
     transportDriverPayrollRows.value.push({
       code: 'P-1',
       name: '张三',
+      financeMonth: '2026-07',
       owner: '',
       status: '核算中',
       amount: '6800.00',
@@ -247,24 +300,26 @@ describe('transport operation shared data', () => {
       { code: 'C-2', plateNo: '青H-002', driverName: '张三', escortName: '张三' },
     )
 
-    expect(syncDriverPayrollFromBaseData()).toBe(true)
+    expect(syncDriverPayrollFromBaseData(new Date(2026, 6, 19))).toBe(true)
 
-    expect(transportDriverPayrollRows.value).toHaveLength(3)
+    expect(transportDriverPayrollRows.value).toHaveLength(1)
     expect(transportDriverPayrollRows.value.find(row => row.name === '张三' && row.crewRole === '司机')).toMatchObject({
       code: 'P-1',
       plateNo: '青H001',
       plateNos: '青H001、青H002',
       netSalary: '6800.00',
     })
-    expect(transportDriverPayrollRows.value.find(row => row.name === '李四')).toMatchObject({
-      crewRole: '押运员',
-      plateNos: '青H001',
-      status: '核算中',
+    expect(syncDriverPayrollFromBaseData(new Date(2026, 6, 19))).toBe(false)
+
+    expect(syncDriverPayrollFromBaseData(new Date(2026, 6, 26))).toBe(true)
+    expect(transportDriverPayrollRows.value).toHaveLength(2)
+    expect(transportDriverPayrollRows.value.find(row => row.financeMonth === '2026-08')).toMatchObject({
+      name: '张三',
+      crewRole: '司机',
+      plateNos: '青H001、青H002',
+      salaryMode: '固定月薪',
+      modeStartDate: '2026-07-26',
     })
-    expect(transportDriverPayrollRows.value.find(row => row.name === '张三' && row.crewRole === '押运员')).toMatchObject({
-      plateNos: '青H002',
-    })
-    expect(syncDriverPayrollFromBaseData()).toBe(false)
   })
 
   it('debounces reactive changes into one persistence request', async () => {
@@ -298,6 +353,24 @@ describe('transport operation shared data', () => {
     expect(fetch).toHaveBeenCalledOnce()
   })
 
+  it('marks an explicitly confirmed deletion as a destructive replacement', async () => {
+    transportOperationHydrated.value = true
+    transportBaseVehicleRows.value.push({ code: 'V-1' })
+    await nextTick()
+    vi.clearAllTimers()
+    transportBaseVehicleRows.value.splice(0, 1)
+    await nextTick()
+    vi.mocked(fetch).mockReturnValueOnce(apiResponse({ code: 200 }))
+
+    await flushTransportOperationData({ confirmDestructiveReplace: true })
+
+    expect(fetch).toHaveBeenCalledOnce()
+    expect(JSON.parse(vi.mocked(fetch).mock.calls[0][1]?.body as string)).toMatchObject({
+      baseVehicles: [],
+      confirmDestructiveReplace: true,
+    })
+  })
+
   it('serializes explicit saves so an older request cannot finish last', async () => {
     transportOperationHydrated.value = true
     let resolveFirst!: (response: Response) => void
@@ -318,32 +391,21 @@ describe('transport operation shared data', () => {
     expect(fetch).toHaveBeenCalledTimes(2)
     expect(JSON.parse(vi.mocked(fetch).mock.calls[1][1]?.body as string).orders).toHaveLength(2)
   })
-})
-it('creates one reusable base route with four stage fences from orders', () => {
-  transportOrderRows.value.push(
-    {
+
+  it('keeps configured routes unchanged when orders reference other routes', async () => {
+    transportBaseRouteRows.value.push({ code: 'LX0050', name: 'Excel 配置路线', source: '基础资料' } as any)
+
+    transportOrderRows.value.push({
       code: 'O-ROUTE-1',
       customer: '昆仑物流陕西分公司',
-      routeLine: '新沃达液厂-宝鸡华明站',
+      routeLine: '订单历史路线',
       loadingAddress: '新沃达液厂',
       unloadingAddress: '宝鸡华明站',
-    } as any,
-    {
-      code: 'O-ROUTE-2',
-      customer: '昆仑物流陕西分公司',
-      routeLine: '新沃达液厂 - 宝鸡华明站',
-      loadingAddress: '新沃达液厂',
-      unloadingAddress: '宝鸡华明站',
-    } as any,
-  )
+    } as any)
+    await nextTick()
 
-  expect(syncTransportRoutesFromOrders()).toBe(true)
-  expect(transportBaseRouteRows.value).toHaveLength(1)
-  expect(transportBaseRouteRows.value[0]).toMatchObject({
-    loadingFenceName: '新沃达液厂装车围栏',
-    transitFenceName: '新沃达液厂至宝鸡华明站运输围栏',
-    unloadingFenceName: '宝鸡华明站卸车围栏',
-    returnFenceName: '宝鸡华明站至新沃达液厂运输围栏',
+    expect(transportBaseRouteRows.value).toEqual([
+      expect.objectContaining({ code: 'LX0050', name: 'Excel 配置路线' }),
+    ])
   })
-  expect(syncTransportRoutesFromOrders()).toBe(false)
 })

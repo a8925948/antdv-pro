@@ -269,7 +269,7 @@ function displayVehicleValue(value?: string) {
 </script>
 
 <template>
-  <page-container title="费用管理" sub-title="运输管理 / 费用管理" description="汇总加油、ETC、维保、规费、车贷和司机薪酬等运输费用，统一查询、核对和导出。">
+  <page-container>
     <a-alert v-if="transportOperationError" class="expense-card" type="error" show-icon :message="transportOperationError" />
 
     <SummaryCards :cards="summaryCards" :xl-span="6" compact :loading="transportOperationLoading" />

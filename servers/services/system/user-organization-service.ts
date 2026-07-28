@@ -14,10 +14,12 @@ export async function resolveUserOrganizations(
     recordOperation: (operation: AuditOperation) => void
   },
 ) {
-  const company = state.organizations.find(item => item.id === payload.companyId)
+  const company = state.organizations.find(item => String(item.id) === String(payload.companyId ?? ''))
     || state.organizations.find(item => item.type === 'company')
 
-  let dept = state.organizations.find(item => item.id === payload.deptId)
+  let dept = state.organizations.find(item =>
+    item.type === 'department' && String(item.id) === String(payload.deptId ?? ''),
+  )
   const inputDeptName = String(payload.deptName ?? '').trim()
   if (!dept && inputDeptName) {
     dept = state.organizations.find(item => item.type === 'department' && item.name === inputDeptName)
@@ -40,7 +42,11 @@ export async function resolveUserOrganizations(
     }
   }
 
-  let post = state.organizations.find(item => item.id === payload.postId)
+  let post = state.organizations.find(item =>
+    item.type === 'post'
+    && String(item.id) === String(payload.postId ?? '')
+    && String(item.parentId) === String(dept?.id ?? ''),
+  )
   const inputPostName = String(payload.postName ?? '').trim()
   if (!post && inputPostName) {
     post = state.organizations.find(item => item.type === 'post' && item.parentId === dept?.id && item.name === inputPostName)

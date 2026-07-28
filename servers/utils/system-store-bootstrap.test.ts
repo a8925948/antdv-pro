@@ -88,4 +88,26 @@ describe('production administrator bootstrap', () => {
       [1, 1],
     )
   })
+
+  it('maps top-level departments to the company and nested departments to their parent department', async () => {
+    vi.clearAllMocks()
+    mocks.poolQuery
+      .mockResolvedValueOnce([[{ id: 1, parent_id: null, type: 'company', name: '测试公司', code: 'COMP001', leader_user_id: null, leader_name: null, sort_no: 0, status: 'enabled' }]])
+      .mockResolvedValueOnce([[
+        { id: 1, parent_id: 1, type: 'department', name: '总经办', code: 'DEPT001', leader_user_id: null, leader_name: null, sort_no: 10, status: 'enabled' },
+        { id: 5, parent_id: 1, type: 'department', name: '运输管理部', code: 'DEPT005', leader_user_id: null, leader_name: null, sort_no: 20, status: 'enabled' },
+      ]])
+      .mockResolvedValueOnce([[{ id: 25, parent_id: 5, type: 'post', name: '监控员', code: 'POST025', leader_user_id: null, leader_name: null, sort_no: 1, status: 'enabled' }]])
+
+    const { systemStore } = await import('./system-store')
+    const organizations = await systemStore.listOrganizations()
+
+    expect(organizations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: '1', type: 'company', parentId: undefined }),
+      expect.objectContaining({ id: '1', type: 'department', parentId: '1' }),
+      expect.objectContaining({ id: '5', type: 'department', parentId: '1' }),
+      expect.objectContaining({ id: '25', type: 'post', parentId: '5' }),
+    ]))
+    expect(mocks.poolQuery.mock.calls[1][0]).toContain('COALESCE(d.parent_id, d.company_id) AS parent_id')
+  })
 })

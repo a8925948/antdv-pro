@@ -1,19 +1,19 @@
 import type {
+  AllocateReceiptInput,
   BankPaymentCallbackInput,
   ConfirmPaymentInput,
   CreatePaymentInstructionInput,
-  ReceiptAllocationInput,
   RegisterReceiptInput,
 } from '../../utils/oa-module-store'
 import { inspectFinanceReconciliation, reconcileApprovedFinanceRecords } from '../../utils/finance-reconciliation'
 import { oaModuleStore } from '../../utils/oa-module-store'
 import { getPaymentProvider, verifyPaymentCallbackSignature } from '../../utils/payment-provider'
 
-export type { BankPaymentCallbackInput, ConfirmPaymentInput, CreatePaymentInstructionInput, ReceiptAllocationInput, RegisterReceiptInput } from '../../utils/oa-module-store'
+export type { AllocateReceiptInput, BankPaymentCallbackInput, ConfirmPaymentInput, CreatePaymentInstructionInput, ReceiptAllocationInput, RegisterReceiptInput } from '../../utils/oa-module-store'
 
 export const approvalFinanceService = {
   registerReceipt: (input: RegisterReceiptInput) => oaModuleStore.registerReceipt(input),
-  allocateReceipt: (id: string, allocations: ReceiptAllocationInput[]) => oaModuleStore.allocateReceipt(id, allocations),
+  allocateReceipt: (id: string, input: AllocateReceiptInput) => oaModuleStore.allocateReceipt(id, input),
   createPayment: (input: CreatePaymentInstructionInput) => oaModuleStore.createPaymentInstruction(input),
   confirmPayment: (id: string, input: ConfirmPaymentInput) => oaModuleStore.confirmPayment(id, input),
   failPayment: (id: string, reason: string) => oaModuleStore.failPayment(id, reason),

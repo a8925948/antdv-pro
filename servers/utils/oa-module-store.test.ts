@@ -44,6 +44,18 @@ describe('oA module memory store', () => {
     await expect(oaModuleStore.replacePartition('org', [], initial.revision!)).rejects.toThrow('已被其他操作更新')
   })
 
+  it('protects locked salary rows from edits and deletion', async () => {
+    const initial = await oaModuleStore.replaceState({
+      modules: {
+        salary: [{ id: 'salary-locked', employeeName: '已锁定员工', status: '已锁定', netSalary: 9200 }],
+      } as any,
+    })
+
+    await expect(oaModuleStore.replacePartition('salary', [{ id: 'salary-locked', employeeName: '已锁定员工', status: '已锁定', netSalary: 9300 }], initial.revision!)).rejects.toThrow('已锁定，不能修改')
+    await expect(oaModuleStore.replacePartition('salary', [], initial.revision!)).rejects.toThrow('已锁定，不能删除')
+    await expect(oaModuleStore.replacePartition('salary', [{ id: 'salary-locked', employeeName: '已锁定员工', status: '草稿', netSalary: 9200 }], initial.revision!)).rejects.toThrow('已锁定，不能回退状态')
+  })
+
   it('creates one payable for an approved finance-related approval', async () => {
     await oaModuleStore.replaceState({})
     const instance = {
@@ -76,6 +88,46 @@ describe('oA module memory store', () => {
       sourceBusinessType: 'transport_fee',
       relatedBill: 'FEE-1',
     })
+  })
+
+  it('updates the receivable module row with approved payment details', async () => {
+    await oaModuleStore.replaceState({})
+    const instance = {
+      id: 'approval-payment-1',
+      code: '202607210001',
+      businessType: 'payment',
+      businessId: 'WECOM-202607210001',
+      businessNo: '202607210001',
+      title: '供应商付款',
+      applicantName: '申请人',
+      amount: 10252,
+      submittedAt: '2026-07-21T04:46:00.000Z',
+      formSnapshot: {
+        counterparty: '大柴旦皖北蔬菜卤肉综合店',
+        paymentDate: '2026-07-21',
+        paymentMethod: '电汇',
+        remark: '发票已开',
+        attachmentFiles: [{ fileId: 'file-1', name: '附件1' }],
+      },
+    } as any
+
+    await updateApprovalRecord(instance, '已确认')
+    await updateApprovalRecord(instance, '已确认')
+
+    expect((await oaModuleStore.getState()).modules.receivable).toEqual([
+      expect.objectContaining({
+        id: 'WECOM-202607210001',
+        counterparty: '大柴旦皖北蔬菜卤肉综合店',
+        billType: '应付',
+        amount: 10252,
+        unpaidAmount: 10252,
+        dueDate: '2026-07-21',
+        date: '2026-07-21',
+        status: '未付',
+        paymentMethod: '电汇',
+        remark: '发票已开',
+      }),
+    ])
   })
 
   it('does not create a payable before approval and voids a reverted payable', async () => {
@@ -121,6 +173,42 @@ describe('oA module memory store', () => {
     await expect(oaModuleStore.registerReceipt(input)).rejects.toThrow('银行流水号已存在')
   })
 
+  it('posts a registered receipt to its exact cash balance account once', async () => {
+    await oaModuleStore.replaceState({
+      cashBalanceRecords: [{
+        id: 'cash-account-register',
+        balance_date: '2026-07-15',
+        company_name: '测试主体',
+        bank_name: '工商银行',
+        account_name: '工行基本户',
+        account_no_tail: '8801',
+        balance_amount: 1000,
+      }],
+    })
+    const input = {
+      cashBalanceId: 'cash-account-register',
+      accountName: '工行基本户',
+      amount: 1200,
+      receiptDate: '2026-07-16',
+      payerName: '客户甲',
+      bankSerialNo: 'BANK-REGISTER-001',
+      sourceApprovalId: 'approval-receipt-register',
+      handler: '测试会计',
+    }
+    const receipt = await oaModuleStore.registerReceipt(input)
+    const retried = await oaModuleStore.registerReceipt(input)
+    const state = await oaModuleStore.getState()
+    expect(receipt).toMatchObject({
+      cashBalanceId: 'cash-account-register',
+      balancePostedAmount: 1200,
+      openingBalance: 1000,
+      currentBalance: 2200,
+    })
+    expect(retried.id).toBe(receipt.id)
+    expect(state.cashBalanceRecords[0]).toMatchObject({ balance_amount: 2200 })
+    expect(state.cashBalanceRecords[0].balanceMovements).toHaveLength(1)
+  })
+
   it('allocates one receipt across receivables and updates settlement statuses', async () => {
     await oaModuleStore.replaceState({
       modules: {
@@ -129,6 +217,15 @@ describe('oA module memory store', () => {
           { id: 'ar-2', code: 'AR-2', billType: '应收', amount: 800, paidAmount: 0, unpaidAmount: 800, status: '未收' },
         ],
       } as any,
+      cashBalanceRecords: [{
+        id: 'cash-account-1',
+        balance_date: '2026-07-15',
+        company_name: '测试主体',
+        bank_name: '建设银行',
+        account_name: '建行一般户',
+        account_no_tail: '1266',
+        balance_amount: 5000,
+      }],
     })
     const receipt = await oaModuleStore.registerReceipt({
       accountName: '建行一般户',
@@ -137,15 +234,33 @@ describe('oA module memory store', () => {
       payerName: '客户乙',
       bankSerialNo: 'BANK-002',
     })
-    const result = await oaModuleStore.allocateReceipt(receipt.id, [
-      { receivableId: 'ar-1', amount: 700 },
-      { receivableId: 'ar-2', amount: 200 },
-    ])
+    const allocationInput = {
+      cashBalanceId: 'cash-account-1',
+      allocationBatchId: 'RA-TEST-1',
+      handler: '测试会计',
+      allocations: [
+        { receivableId: 'ar-1', amount: 700 },
+        { receivableId: 'ar-2', amount: 200 },
+      ],
+    }
+    const result = await oaModuleStore.allocateReceipt(receipt.id, allocationInput)
+    const retried = await oaModuleStore.allocateReceipt(receipt.id, allocationInput)
     expect(result.receipt).toMatchObject({ recognizedAmount: 900, unrecognizedAmount: 100, status: '部分认领' })
+    expect(retried.receipt).toMatchObject({ recognizedAmount: 900, unrecognizedAmount: 100 })
     expect(result.receivables).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: 'ar-1', paidAmount: 700, unpaidAmount: 0, status: '已结清' }),
       expect.objectContaining({ id: 'ar-2', paidAmount: 200, unpaidAmount: 600, status: '部分收款' }),
     ]))
+    expect(result.cashBalance).toMatchObject({ id: 'cash-account-1', balance_amount: 6000 })
+    expect(result.cashBalance.balanceMovements[0]).toMatchObject({
+      receiptId: receipt.id,
+      amount: 1000,
+      balanceBefore: 5000,
+      balanceAfter: 6000,
+      receivableCodes: ['AR-1', 'AR-2'],
+      allocatedAmount: 900,
+    })
+    expect((await oaModuleStore.getState()).cashBalanceRecords[0].balance_amount).toBe(6000)
   })
 
   it('rejects over-allocation without changing the receipt or receivable', async () => {
@@ -157,7 +272,11 @@ describe('oA module memory store', () => {
       payerName: '客户丙',
       bankSerialNo: 'BANK-003',
     })
-    await expect(oaModuleStore.allocateReceipt(receipt.id, [{ receivableId: 'ar-1', amount: 400 }])).rejects.toThrow('未认领金额')
+    await expect(oaModuleStore.allocateReceipt(receipt.id, {
+      cashBalanceId: 'cash-account-1',
+      allocationBatchId: 'RA-OVER-1',
+      allocations: [{ receivableId: 'ar-1', amount: 400 }],
+    })).rejects.toThrow('未认领金额')
     const state = await oaModuleStore.getState()
     expect(state.modules.cash[0]).toMatchObject({ recognizedAmount: 0, unrecognizedAmount: 300 })
     expect(state.modules.receivable[0]).toMatchObject({ paidAmount: 0, unpaidAmount: 500 })
@@ -269,9 +388,13 @@ describe('oA module memory store', () => {
         ],
         cash: [{ id: 'balance-1', accountName: '工行基本户', currentBalance: 1000, date: '2026-07-15', flowType: '余额初始化', status: '正常' }],
       } as any,
+      cashBalanceRecords: [{ id: 'cash-account-1', company_name: '测试主体', bank_name: '工商银行', account_no_tail: '62220001', balance_amount: 1000 }],
     })
     const instruction = await oaModuleStore.createPaymentInstruction({
       paymentRequestNo: 'REQ-004',
+      cashBalanceId: 'cash-account-1',
+      companyName: '测试主体',
+      accountNo: '62220001',
       accountName: '工行基本户',
       paymentDate: '2026-07-16',
       payeeName: '供应商',
@@ -285,6 +408,7 @@ describe('oA module memory store', () => {
       expect.objectContaining({ id: 'ap-1', paidAmount: 300, unpaidAmount: 0, status: '已结清' }),
       expect.objectContaining({ id: 'ap-2', paidAmount: 200, unpaidAmount: 300, status: '部分付款' }),
     ]))
+    expect((await oaModuleStore.getState()).cashBalanceRecords[0]).toMatchObject({ id: 'cash-account-1', balance_amount: 500 })
   })
 
   it('marks a payment failed without settling payables and releases its reservation', async () => {

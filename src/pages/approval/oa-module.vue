@@ -5,18 +5,24 @@ import type { SummaryCardItem } from '~@/components/summary-cards/index.vue'
 import { Modal } from 'ant-design-vue'
 import dayjs from 'dayjs'
 import * as XLSX from 'xlsx'
-import { allocateReceiptApi, confirmPaymentApi, createPaymentApi, failPaymentApi, getApprovalBusinessRecordsApi, getFinanceReconciliationApi, getOaModuleStateApi, reconcileFinanceRecordsApi, registerReceiptApi, saveOaModulePartitionApi, submitPaymentApi } from '~@/api/approval'
+import { allocateReceiptApi, confirmPaymentApi, createPaymentApi, failPaymentApi, generateSalaryPeriodApi, getApprovalBusinessRecordsApi, getFinanceReconciliationApi, getOaModuleStateApi, getSalaryTemplatesApi, reconcileFinanceRecordsApi, registerReceiptApi, saveOaModulePartitionApi, saveSalaryTemplateApi, submitPaymentApi } from '~@/api/approval'
+import { getSystemOrganizationsApi, getSystemUsersApi } from '~@/api/system'
 import FinancialPeriodFilter from '~@/components/financial-period-filter/index.vue'
 import SummaryCards from '~@/components/summary-cards/index.vue'
+import { useBusinessDictionaries } from '~@/composables/business-dictionaries'
 import { useFinancialPeriodFilter } from '~@/composables/financial-period-filter'
 import { createBusinessTableScrollX } from '~@/utils/business-table'
 import { calculateActualCashTrend, calculateFinanceDashboardMetrics, latestCashBalance } from '~@/utils/finance-dashboard'
+import { isSalaryEligibleEmployee, isSystemAdministratorSalary } from '~@/utils/salary-organization'
 import { APPROVAL_BUSINESS_MAP, approvalOaModuleKey } from '../../../shared/approval-business-catalog'
+import { calculateSalary } from '../../../shared/salary-calculation'
 import CashBalanceView from './components/cash-balance-view.vue'
+import FinanceAgingInsights from './components/finance-aging-insights.vue'
 import FinanceWorkflowView from './components/finance-workflow-view.vue'
 import OaBusinessTable from './components/oa-business-table.vue'
 import OaDashboardView from './components/oa-dashboard-view.vue'
 import OrgManagementView from './components/org-management-view.vue'
+import SalaryWorkspaceControls from './components/salary-workspace-controls.vue'
 
 type ModuleKey = 'dashboard' | 'receivable' | 'cash' | 'salary' | 'org' | 'vehicle'
 type MoneyField = 'amount' | 'paidAmount' | 'unpaidAmount' | 'openingBalance' | 'incomeAmount' | 'expenseAmount' | 'currentBalance' | 'basicSalary' | 'performanceSalary' | 'allowance' | 'deduction' | 'socialSecurity' | 'tax' | 'grossSalary' | 'netSalary' | 'fuelFee' | 'tollFee' | 'parkingFee' | 'maintenanceFee' | 'insuranceFee' | 'inspectionFee' | 'otherFee' | 'totalFee'
@@ -57,6 +63,7 @@ interface CashBalanceRecord {
   created_at: string
   updated_by?: string | number
   updated_at: string
+  balanceMovements?: Array<Record<string, any>>
 }
 
 type CashBalanceDraft = Omit<CashBalanceRecord, 'id' | 'updated_by' | 'updated_at'> & { created_at?: string }
@@ -72,6 +79,7 @@ interface ModuleProfile {
 }
 
 const props = defineProps<{ moduleKey?: ModuleKey }>()
+const businessDictionaries = useBusinessDictionaries()
 
 const moneyFields = new Set<string>([
   'amount',
@@ -123,7 +131,9 @@ const route = useRoute()
 const router = useRouter()
 const message = useMessage()
 const userStore = useUserStore()
-const { model: financialPeriodFilter, resetFinancialPeriodFilter } = useFinancialPeriodFilter()
+const isSalaryRoute = props.moduleKey === 'salary' || route.path === '/oa-approval/salary'
+const salaryDefaultPeriod = () => isSalaryRoute ? { financialMonth: dayjs().month() + 1 } : undefined
+const { model: financialPeriodFilter, resetFinancialPeriodFilter } = useFinancialPeriodFilter(salaryDefaultPeriod())
 const loading = ref(false)
 const loadError = ref('')
 const saving = ref(false)
@@ -155,10 +165,35 @@ const detailOpen = ref(false)
 const editOpen = ref(false)
 const detailRecord = ref<OaRecord>()
 const editingRecord = ref<OaRecord>()
-const salaryImportInput = ref<HTMLInputElement>()
 const salaryInlineEditingId = ref('')
 const salaryInlineSnapshot = ref<OaRecord>()
 const salaryActiveTab = ref<'records' | 'templates'>('records')
+const salaryTemplateOpen = ref(false)
+const salaryAutoGenerating = ref(false)
+const salaryAutoGenerationError = ref('')
+let salaryAutoGenerationReady = false
+let salaryAutoGenerationRequestId = 0
+const salaryTemplateSaving = ref(false)
+const salaryTemplateForm = reactive<Record<string, any>>({
+  companyName: '',
+  department: '',
+  position: '',
+  basicSalary: 0,
+  performanceSalary: 0,
+  senioritySalary: 0,
+  overtimeAllowance: 0,
+  travelAllowance: 0,
+  retroactiveSalary: 0,
+  socialSecurityBase: 0,
+  tax: 0,
+  absenceDeductionPerDay: 0,
+  housingFundBase: 0,
+  companyHousingFundRatePercent: 0,
+  personalHousingFundRatePercent: 0,
+  effectiveDate: dayjs().format('YYYY-MM-DD'),
+  remark: '',
+})
+const salaryTemplates = ref<Array<Record<string, any>>>([])
 const orgActiveTab = ref<'employees' | 'positions' | 'departments'>('employees')
 const orgTreeKeyword = ref('')
 const selectedOrgKey = ref('ORG001')
@@ -175,6 +210,7 @@ const receiptOpen = ref(false)
 const receiptAllocationOpen = ref(false)
 const allocatingReceipt = ref<OaRecord>()
 const receiptForm = reactive({
+  cashBalanceId: '',
   accountName: '',
   amount: 0,
   receiptDate: dayjs().format('YYYY-MM-DD'),
@@ -185,13 +221,20 @@ const receiptForm = reactive({
   remark: '',
 })
 const receiptAllocationRows = ref<Array<{ receivableId: string, amount: number, remark: string }>>([])
+const receiptAllocationCashBalanceId = ref('')
+const receiptAllocationBatchId = ref('')
+const cashBalanceHistoryOpen = ref(false)
+const activeCashBalance = ref<CashBalanceRecord>()
 const paymentOpen = ref(false)
 const paymentConfirmOpen = ref(false)
 const paymentFailOpen = ref(false)
 const activePayment = ref<OaRecord>()
 const paymentForm = reactive({
   paymentRequestNo: '',
+  cashBalanceId: '',
+  companyName: '',
   accountName: '',
+  accountNo: '',
   paymentDate: dayjs().format('YYYY-MM-DD'),
   payeeName: '',
   accountType: '银行账户',
@@ -205,12 +248,12 @@ const batchBalanceOpen = ref(false)
 const batchConfirmOpen = ref(false)
 const editingBalanceId = ref('')
 const cashBalanceQuery = reactive({
-  balance_date: '2026-07-05',
+  balance_date: '',
   company_name: '',
   bank_name: '',
 })
 const cashBalanceForm = reactive({
-  balance_date: '2026-07-05',
+  balance_date: dayjs().format('YYYY-MM-DD'),
   company_name: '',
   bank_name: '',
   account_name: '',
@@ -220,6 +263,13 @@ const cashBalanceForm = reactive({
 })
 const batchBalanceRows = ref<CashBalanceDraft[]>([])
 const cashBalanceRecords = ref<CashBalanceRecord[]>([])
+const receiptCashAccounts = computed(() => cashBalanceRecords.value)
+const selectedReceiptCashAccount = computed(() => cashBalanceRecords.value.find(row => row.id === receiptForm.cashBalanceId))
+const selectedReceiptAllocationCashAccount = computed(() => cashBalanceRecords.value.find(row => row.id === receiptAllocationCashBalanceId.value))
+const paymentCashAccounts = computed(() => cashBalanceRecords.value.filter(row => Number(row.balance_amount || 0) >= 0))
+const paymentCompanyOptions = computed(() => [...new Set(paymentCashAccounts.value.map(row => row.company_name))].filter(Boolean))
+const paymentAccountOptions = computed(() => paymentCashAccounts.value.filter(row => row.company_name === paymentForm.companyName))
+const selectedPaymentCashAccount = computed(() => cashBalanceRecords.value.find(row => row.id === paymentForm.cashBalanceId))
 const oaStateRevision = ref(0)
 
 const currentUser = computed(() => userStore.userInfo)
@@ -403,11 +453,82 @@ const moduleProfiles = reactive<Record<ModuleKey, ModuleProfile>>({
 
 function applyOaModuleState(data: any) {
   const modules = data?.modules || {}
-  ;(['dashboard', 'receivable', 'cash', 'salary', 'org', 'vehicle'] as ModuleKey[]).forEach((key) => {
-    moduleProfiles[key].rows = Array.isArray(modules[key]) ? modules[key] : []
+  // Organization data is mirrored from system management and is never owned by OA partition responses.
+  ;(['dashboard', 'receivable', 'cash', 'salary', 'vehicle'] as ModuleKey[]).forEach((key) => {
+    const rows = Array.isArray(modules[key]) ? modules[key] : []
+    moduleProfiles[key].rows = key === 'salary'
+      ? rows.map((row: OaRecord) => ({
+          requiredAttendanceDays: Number(row.requiredAttendanceDays || dayjs(`${row.financialYear}-${String(row.financialMonth).padStart(2, '0')}-01`).daysInMonth()),
+          actualAttendanceDays: Number(row.actualAttendanceDays ?? row.attendanceDays ?? row.requiredAttendanceDays ?? 0),
+          leaveDays: 0,
+          absenceDays: 0,
+          absenceDeduction: 0,
+          attendanceStatus: '待录入',
+          allowanceBonus: Number(row.senioritySalary || 0) + Number(row.overtimeAllowance || 0) + Number(row.travelAllowance || 0) + Number(row.retroactiveSalary || 0),
+          ...row,
+        }))
+      : rows
   })
   cashBalanceRecords.value = Array.isArray(data?.cashBalanceRecords) ? data.cashBalanceRecords : []
   oaStateRevision.value = Number(data?.revision || 0)
+}
+
+async function loadSystemOrganizationMirror() {
+  const [orgResponse, userResponse, templateResponse] = await Promise.all([getSystemOrganizationsApi(), getSystemUsersApi(), getSalaryTemplatesApi()])
+  if (orgResponse.code !== 200 || userResponse.code !== 200)
+    throw new Error('系统组织架构加载失败')
+
+  const organizations = orgResponse.data || []
+  const users = userResponse.data || []
+  salaryTemplates.value = templateResponse.code === 200 ? (templateResponse.data || []) : []
+  const byId = new Map(organizations.map(item => [String(item.id), item]))
+  const nameOf = (id?: string) => id ? byId.get(String(id))?.name || '' : ''
+  const roleLabels: Record<string, string> = {
+    ADMIN: '管理员',
+    APPROVER: '审批人',
+    DEPT_LEADER: '部门负责人',
+    FINANCE_MANAGER: '财务',
+    USER: '普通用户',
+  }
+  const rows: OaRecord[] = organizations.map(item => ({
+    id: `system-org-${item.id}`,
+    code: item.code,
+    name: item.name,
+    orgType: item.type === 'company' ? '公司' : item.type === 'department' ? '部门' : '岗位',
+    parentDepartment: nameOf(item.parentId),
+    leader: item.leaderName || '',
+    approver: '',
+    role: '',
+    phone: '',
+    status: item.status === 'enabled' ? '正常' : '停用',
+    date: '',
+    sortNo: item.sortNo,
+    companyName: item.type === 'company' ? item.name : nameOf(organizations.find(parent => parent.type === 'company')?.id),
+    financialYear: 0,
+    financialMonth: 0,
+  }))
+  users.forEach((user) => {
+    rows.push({
+      id: `system-user-${user.id || user.username}`,
+      code: user.username,
+      name: user.nickname,
+      orgType: '员工',
+      parentDepartment: user.deptName || nameOf(user.deptId),
+      position: user.postName || nameOf(user.postId),
+      leader: user.leaderName || '',
+      approver: user.leaderName || '',
+      role: (user.roles || []).map(role => roleLabels[role] || role).join('、'),
+      systemRoles: user.roles || [],
+      phone: user.mobile,
+      email: user.email || '',
+      status: user.status === 'enabled' ? '在职' : '停用',
+      date: user.updatedAt || user.createdAt || '',
+      companyName: user.companyName || '',
+      financialYear: 0,
+      financialMonth: 0,
+    })
+  })
+  moduleProfiles.org.rows = rows
 }
 
 async function loadOaModuleState() {
@@ -416,6 +537,8 @@ async function loadOaModuleState() {
   try {
     const [res, approvalRes] = await Promise.all([getOaModuleStateApi(), getApprovalBusinessRecordsApi()])
     applyOaModuleState(res.data)
+    // System management is the single source for OA personnel associations.
+    await loadSystemOrganizationMirror()
     const approvalRows = (approvalRes.data || []).map((item: any) => ({
       id: `approval-${item.approvalInstanceId || item.businessId}`,
       code: item.businessNo,
@@ -511,6 +634,30 @@ async function persistOaModuleState(successText?: string, partition: ModuleKey |
   }
 }
 
+async function ensureSalaryPeriodGenerated() {
+  if (activeKey.value !== 'salary')
+    return
+  const requestId = ++salaryAutoGenerationRequestId
+  const period = { ...currentSalaryPeriod.value }
+  salaryAutoGenerating.value = true
+  salaryAutoGenerationError.value = ''
+  try {
+    const res = await generateSalaryPeriodApi(period)
+    if (requestId !== salaryAutoGenerationRequestId)
+      return
+    applyOaModuleState(res.data)
+  }
+  catch (error: any) {
+    if (requestId !== salaryAutoGenerationRequestId)
+      return
+    salaryAutoGenerationError.value = error?.message || '当月工资表自动生成失败'
+  }
+  finally {
+    if (requestId === salaryAutoGenerationRequestId)
+      salaryAutoGenerating.value = false
+  }
+}
+
 const activeKey = computed<ModuleKey>(() => {
   const moduleByPath: Record<string, ModuleKey> = {
     '/oa-approval/dashboard': 'dashboard',
@@ -526,32 +673,32 @@ const activeKey = computed<ModuleKey>(() => {
 const activeProfile = computed(() => moduleProfiles[activeKey.value])
 const rows = computed(() => activeProfile.value.rows)
 const availableMonthKeys = computed(() => [...new Set(rows.value.map(row => `${row.financialYear}${String(row.financialMonth).padStart(2, '0')}`))])
-const filteredRows = computed(() => rows.value.filter(row => matchesFilter(row)))
+const filteredRows = computed(() => rows.value.filter(row =>
+  matchesFilter(row) && (activeKey.value !== 'salary' || !isSystemAdministratorSalary(row, moduleProfiles.org.rows)),
+))
 const actionColumn = { title: '操作', dataIndex: 'action', fixed: 'right' as const, width: 180 }
 const salaryTableColumns = computed(() => [
-  { title: '姓名', dataIndex: 'employeeName', width: 100, fixed: 'left' as const },
-  { title: '岗位', dataIndex: 'position', width: 110, fixed: 'left' as const },
-  { title: '公司名称', dataIndex: 'companyName', width: 170, fixed: 'left' as const },
-  { title: '部门', dataIndex: 'department', width: 110, fixed: 'left' as const },
-  { title: '财务月', dataIndex: 'financialMonth', width: 80 },
-  { title: '出勤天数', dataIndex: 'attendanceDays', width: 90 },
-  { title: '基本工资', dataIndex: 'basicSalary', width: 110 },
-  { title: '绩效工资', dataIndex: 'performanceSalary', width: 110 },
-  { title: '工龄工资', dataIndex: 'senioritySalary', width: 110 },
-  { title: '加班补助', dataIndex: 'overtimeAllowance', width: 110 },
-  { title: '出差补助', dataIndex: 'travelAllowance', width: 110 },
-  { title: '补发工资', dataIndex: 'retroactiveSalary', width: 110 },
-  { title: '社保基数', dataIndex: 'socialSecurityBase', width: 100 },
-  { title: '代扣个税', dataIndex: 'tax', width: 100 },
-  { title: '应发工资', dataIndex: 'grossSalary', width: 110 },
-  { title: '合计金额', dataIndex: 'totalAmount', width: 110 },
-  { title: '公司社保', dataIndex: 'companySocialSecurityTotal', width: 110 },
-  { title: '个人社保', dataIndex: 'personalSocialSecurityTotal', width: 110 },
-  { title: '实发工资', dataIndex: 'netSalary', width: 110 },
-  { title: '现金发放', dataIndex: 'cashPayment', width: 110 },
-  { title: '发放状态', dataIndex: 'payStatus', width: 100 },
-  { title: '审批状态', dataIndex: 'status', width: 100 },
-  actionColumn,
+  { title: '序号', dataIndex: 'sequenceNo', width: 60, fixed: 'left' as const },
+  { title: '员工', dataIndex: 'employeeName', width: 170, fixed: 'left' as const },
+  {
+    title: '本月录入',
+    children: [
+      { title: '出勤天数', dataIndex: 'actualAttendanceDays', width: 120 },
+      { title: '加班补助', dataIndex: 'overtimePay', width: 120 },
+      { title: '出差补助', dataIndex: 'subsidy', width: 120 },
+    ],
+  },
+  {
+    title: '自动核算',
+    children: [
+      { title: '应发工资', dataIndex: 'grossSalary', width: 120 },
+      { title: '个人社保', dataIndex: 'personalSocialSecurityTotal', width: 115 },
+      { title: '代扣个税', dataIndex: 'tax', width: 105 },
+      { title: '实发工资', dataIndex: 'netSalary', width: 125 },
+    ],
+  },
+  { title: '状态', dataIndex: 'status', width: 100, fixed: 'right' as const },
+  { ...actionColumn, width: 90 },
 ])
 const salaryTemplateColumns = computed(() => enhanceColumns([
   { title: '员工姓名', dataIndex: 'employeeName', width: 110, fixed: 'left' as const },
@@ -559,19 +706,12 @@ const salaryTemplateColumns = computed(() => enhanceColumns([
   { title: '公司名称', dataIndex: 'companyName', width: 170 },
   { title: '部门', dataIndex: 'department', width: 120 },
   { title: '岗位', dataIndex: 'position', width: 120 },
-  { title: '基本工资', dataIndex: 'basicSalary', width: 110 },
+  { title: '社保基数', dataIndex: 'socialSecurityBase', width: 110 },
+  { title: '基础工资', dataIndex: 'basicSalary', width: 110 },
   { title: '绩效工资', dataIndex: 'performanceSalary', width: 110 },
   { title: '工龄工资', dataIndex: 'senioritySalary', width: 110 },
-  { title: '加班补助', dataIndex: 'overtimeAllowance', width: 110 },
-  { title: '出差补助', dataIndex: 'travelAllowance', width: 110 },
-  { title: '补发工资', dataIndex: 'retroactiveSalary', width: 110 },
-  { title: '社保基数', dataIndex: 'socialSecurityBase', width: 110 },
-  { title: '默认个税', dataIndex: 'tax', width: 100 },
-  { title: '工资审批人', dataIndex: 'salaryApprover', width: 120 },
-  { title: '直属领导', dataIndex: 'leader', width: 110 },
+  { title: '岗位模板', dataIndex: 'templateStatus', width: 130 },
   { title: '人员状态', dataIndex: 'employeeStatus', width: 100 },
-  { title: '关联状态', dataIndex: 'linkStatus', width: 110 },
-  { title: '来源模块', dataIndex: 'sourceModule', width: 120 },
   actionColumn,
 ]))
 const salaryWageFields = new Set(['basicSalary', 'performanceSalary', 'senioritySalary', 'overtimeAllowance', 'travelAllowance', 'retroactiveSalary', 'grossSalary', 'totalAmount', 'netSalary'])
@@ -582,14 +722,28 @@ const tableColumns = computed(() => {
   return enhanceColumns([...activeProfile.value.columns, actionColumn])
 })
 const activeTableScroll = computed(() => activeKey.value === 'salary'
-  ? { x: createBusinessTableScrollX(tableColumns.value, salaryActiveTab.value === 'templates' ? 2000 : 1880), y: 620 }
+  ? { x: createBusinessTableScrollX(tableColumns.value, salaryActiveTab.value === 'templates' ? 1450 : 1280) }
   : { x: createBusinessTableScrollX(tableColumns.value, 1400) })
 const dashboardSource = computed(() => Object.values(moduleProfiles).flatMap(item => item.rows).filter(row => itemMatchesPeriod(row)))
 const currentSalaryPeriod = computed(() => ({
   financialYear: financialPeriodFilter.financialYear || dayjs().year(),
   financialMonth: financialPeriodFilter.financialMonth || (dayjs().month() + 1),
 }))
-const currentCashBalanceDate = computed(() => cashBalanceQuery.balance_date || [...new Set(cashBalanceRecords.value.map(row => row.balance_date))].sort().at(-1) || dayjs().format('YYYY-MM-DD'))
+const currentSalaryRows = computed(() => moduleProfiles.salary.rows.filter(row =>
+  row.financialYear === currentSalaryPeriod.value.financialYear
+  && row.financialMonth === currentSalaryPeriod.value.financialMonth
+  && !isSystemAdministratorSalary(row, moduleProfiles.org.rows),
+))
+const salaryPeriodOverview = computed(() => {
+  const list = currentSalaryRows.value
+  const employeeCount = orgEmployees.value.filter(row => row.status === '在职' && row.companyName).length
+  const missingCount = Math.max(0, employeeCount - new Set(list.map(row => row.employeeId || `${row.companyName}-${row.employeeName}`)).size)
+  const pendingEntryCount = list.filter(row => row.attendanceStatus === '待补录' || row.attendanceStatus === '待录入').length
+  const lockedCount = list.filter(row => ['已锁定', '审批通过', '已发放', '已归档'].includes(String(row.status))).length
+  const paidCount = list.filter(row => row.payStatus === '已发放' || row.status === '已发放').length
+  const status = !list.length ? '未生成' : paidCount === list.length ? '已发放' : lockedCount === list.length ? '待审批/发放' : pendingEntryCount ? '待补录' : '核算中'
+  return { employeeCount, generatedCount: list.length, missingCount, pendingEntryCount, lockedCount, paidCount, status }
+})
 const filteredCashBalanceRecords = computed(() => cashBalanceRecords.value.filter((row) => {
   if (cashBalanceQuery.balance_date && row.balance_date !== cashBalanceQuery.balance_date)
     return false
@@ -599,19 +753,12 @@ const filteredCashBalanceRecords = computed(() => cashBalanceRecords.value.filte
     return false
   return true
 }))
-const currentCashBalanceRecords = computed(() => cashBalanceRecords.value.filter(row => row.balance_date === currentCashBalanceDate.value))
+const currentCashBalanceRecords = computed(() => cashBalanceRecords.value)
 const cashBalanceTotal = computed(() => currentCashBalanceRecords.value.reduce((total, row) => total + Number(row.balance_amount || 0), 0))
 const cashBalanceGroups = computed(() => groupCashBalances(filteredCashBalanceRecords.value))
 const currentCashBalanceGroups = computed(() => groupCashBalances(currentCashBalanceRecords.value))
 const batchBalanceSummary = computed(() => groupCashBalances(batchBalanceRows.value as CashBalanceRecord[]))
 const batchBalanceTotal = computed(() => batchBalanceRows.value.reduce((total, row) => total + Number(row.balance_amount || 0), 0))
-const cashBalanceCards = computed<SummaryCardItem[]>(() => [
-  { label: '当前统计日期', value: currentCashBalanceDate.value, hint: '每日现金余额快照', tone: 'primary' },
-  { label: '现金总余额', value: money(cashBalanceTotal.value), hint: '全部主体汇总', tone: 'success' },
-  { label: '主体数量', value: new Set(currentCashBalanceRecords.value.map(row => row.company_name)).size, hint: '公司/主体数', tone: 'default' },
-  { label: '银行账户数量', value: new Set(currentCashBalanceRecords.value.map(row => `${row.bank_name}-${row.account_no_tail}`)).size, hint: '银行账户数', tone: 'default' },
-])
-
 const dashboardMetrics = computed(() => calculateFinanceDashboardMetrics(
   dashboardSource.value,
   currentCashBalanceRecords.value.length ? cashBalanceTotal.value : undefined,
@@ -716,17 +863,17 @@ const dashboardQuickLinks = [
   { label: '查看待收待付', path: '/oa-approval/receivable-payable', desc: '应收应付与逾期' },
   { label: '核对现金余额', path: '/oa-approval/cash', desc: '银行与现金账户' },
   { label: '审核工资', path: '/oa-approval/salary', desc: '工资、考勤、发放' },
-  { label: '维护组织架构', path: '/oa-approval/org', desc: '人员、部门、岗位' },
+  { label: '维护组织架构', path: '/system/organization', desc: '人员、部门、岗位' },
   { label: '检查用车费用', path: '/oa-approval/vehicle', desc: '用车、票据、到期' },
 ]
 
-const companyNameOptions = [DEFAULT_COMPANY_NAME, '青海诚域能源有限公司', '青海诺锐新能源有限公司']
-const roleOptions = ['管理员', '财务审批', '行政审批', '用车审批', '工资审批', '部门主管', '普通员工']
-const positionLevelOptions = ['高层', '中层', '主管', '专员', '一线']
+const companyNameOptions = computed(() => businessDictionaries.values('oa_company'))
+const roleOptions = computed(() => businessDictionaries.values('oa_role'))
+const positionLevelOptions = computed(() => businessDictionaries.values('position_level'))
 const orgRows = computed(() => moduleProfiles.org.rows)
 const orgDepartments = computed(() => orgRows.value.filter(row => ['公司', '部门'].includes(row.orgType)))
 const orgPositions = computed(() => orgRows.value.filter(row => row.orgType === '岗位'))
-const orgEmployees = computed(() => orgRows.value.filter(row => row.orgType === '员工'))
+const orgEmployees = computed(() => orgRows.value.filter(isSalaryEligibleEmployee))
 const salaryTemplateRows = computed(() => orgEmployees.value.map((employee, index) => buildSalaryTemplateRow(employee, index + 1)).filter(row => matchesSalaryTemplateFilter(row)))
 const salaryVisibleRows = computed(() => salaryActiveTab.value === 'templates' ? salaryTemplateRows.value : filteredRows.value)
 const orgEmployeeMap = computed(() => new Map(orgEmployees.value.map(row => [`${row.companyName}-${row.name}`, row])))
@@ -829,20 +976,21 @@ const orgTableColumns = computed(() => {
 })
 const orgTableScrollX = computed(() => createBusinessTableScrollX(orgTableColumns.value, 1400))
 const cashBalanceTableColumns = computed(() => enhanceColumns([
-  { title: '统计日期', dataIndex: 'balance_date', width: 120 },
-  { title: '主体名称', dataIndex: 'company_name', width: 180 },
-  { title: '银行名称', dataIndex: 'bank_name', width: 130 },
-  { title: '账户名称', dataIndex: 'account_name', width: 150 },
-  { title: '账号尾号', dataIndex: 'account_no_tail', width: 100 },
+  { title: '日期', dataIndex: 'balance_date', width: 120, ellipsis: false },
+  { title: '主体名称', dataIndex: 'company_name', width: 220, ellipsis: false },
+  { title: '银行名称', dataIndex: 'bank_name', width: 200, ellipsis: false },
+  { title: '账户名称', dataIndex: 'account_name', width: 170, ellipsis: false },
+  { title: '账号', dataIndex: 'account_no_tail', width: 220, ellipsis: false },
   { title: '余额', dataIndex: 'balance_amount', width: 130 },
-  { title: '备注', dataIndex: 'remark', width: 180 },
-  { title: '操作', dataIndex: 'action', width: 150, fixed: 'right' },
+  { title: '最近变动', dataIndex: 'last_movement', width: 220, ellipsis: false },
+  { title: '备注', dataIndex: 'remark', width: 220, ellipsis: false },
+  { title: '操作', dataIndex: 'action', width: 200, fixed: 'right' },
 ]))
-const cashBalanceTableScrollX = computed(() => createBusinessTableScrollX(cashBalanceTableColumns.value, 1140))
-const batchBalanceTableScrollX = computed(() => createBusinessTableScrollX(cashBalanceTableColumns.value, 1040))
+const cashBalanceTableScrollX = computed(() => createBusinessTableScrollX(cashBalanceTableColumns.value, 1580))
+const batchBalanceTableScrollX = computed(() => createBusinessTableScrollX(cashBalanceTableColumns.value, 1310))
 
 function createOrgForm(type: '部门' | '岗位' | '员工'): OaRecord {
-  return {
+  const row = {
     id: '',
     code: '',
     orgType: type,
@@ -876,58 +1024,15 @@ function createOrgForm(type: '部门' | '岗位' | '员工'): OaRecord {
     date: dayjs().format('YYYY-MM-DD'),
     financialYear: dayjs().year(),
     financialMonth: dayjs().month() + 1,
-  }
-}
-
-function buildSalaryRecordFromEmployee(employee: OaRecord, financialYear: number, financialMonth: number, sequenceNo: number): OaRecord {
-  const record: OaRecord = {
-    id: `salary-${employee.code}-${financialYear}${String(financialMonth).padStart(2, '0')}`,
-    code: `SAL${financialYear}${String(financialMonth).padStart(2, '0')}${employee.code}`,
-    employeeId: employee.code,
-    companyName: employee.companyName,
-    sequenceNo,
-    employeeName: employee.name,
-    department: employee.parentDepartment,
-    position: employee.position,
-    financialYear,
-    financialMonth,
-    attendanceDays: 31,
-    basicSalary: Number(employee.basicSalary ?? 0),
-    performanceSalary: Number(employee.performanceSalary ?? 0),
-    grossSalary: 0,
-    attendanceSalary: 0,
-    senioritySalary: Number(employee.senioritySalary ?? 0),
-    overtimeAllowance: Number(employee.overtimeAllowance ?? 0),
-    travelAllowance: Number(employee.travelAllowance ?? 0),
-    retroactiveSalary: Number(employee.retroactiveSalary ?? 0),
-    totalAmount: 0,
-    socialSecurityBase: Number(employee.socialSecurityBase ?? 0),
-    companyPension: 0,
-    companyMedical: 0,
-    companyInjury: 0,
-    companyUnemployment: 0,
-    companySocialSecurityTotal: 0,
-    personalPension: 0,
-    personalMedical: 0,
-    personalInjury: 0,
-    personalUnemployment: 0,
-    personalSocialSecurityTotal: 0,
-    tax: Number(employee.tax ?? 0),
-    netSalary: 0,
-    cashPayment: '',
-    remark: '',
-    payStatus: '未发放',
-    status: '草稿',
-    date: `${financialYear}-${String(financialMonth).padStart(2, '0')}-01`,
-    createdBy: currentUser.value?.id ?? 1,
-    approverId: 1,
-  }
-  recalculateSalary(record)
-  return record
+  } as OaRecord
+  recalculateSalary(row)
+  return row
 }
 
 function buildSalaryTemplateRow(employee: OaRecord, sequenceNo: number): OaRecord {
   const { financialYear, financialMonth } = currentSalaryPeriod.value
+  const template = salaryTemplates.value.find(item => item.employeeId === employee.code)
+    || salaryTemplates.value.find(item => item.companyName === employee.companyName && item.department === employee.parentDepartment && item.position === employee.position)
   const linkedSalary = moduleProfiles.salary.rows.find(row =>
     row.companyName === employee.companyName
     && row.financialYear === financialYear
@@ -935,7 +1040,7 @@ function buildSalaryTemplateRow(employee: OaRecord, sequenceNo: number): OaRecor
     && row.employeeName === employee.name,
   )
 
-  return {
+  const row: OaRecord = {
     id: `salary-template-${employee.code}`,
     code: `TPL-${employee.code}`,
     employeeId: employee.code,
@@ -944,14 +1049,19 @@ function buildSalaryTemplateRow(employee: OaRecord, sequenceNo: number): OaRecor
     department: employee.parentDepartment,
     position: employee.position,
     sequenceNo,
-    basicSalary: Number(employee.basicSalary ?? 0),
-    performanceSalary: Number(employee.performanceSalary ?? 0),
-    senioritySalary: Number(employee.senioritySalary ?? 0),
-    overtimeAllowance: Number(employee.overtimeAllowance ?? 0),
-    travelAllowance: Number(employee.travelAllowance ?? 0),
-    retroactiveSalary: Number(employee.retroactiveSalary ?? 0),
-    socialSecurityBase: Number(employee.socialSecurityBase ?? 0),
-    tax: Number(employee.tax ?? 0),
+    basicSalary: Number(template?.basicSalary ?? employee.basicSalary ?? 0),
+    performanceSalary: Number(template?.performanceSalary ?? employee.performanceSalary ?? 0),
+    senioritySalary: Number(template?.senioritySalary ?? employee.senioritySalary ?? 0),
+    overtimeAllowance: Number(template?.overtimeAllowance ?? employee.overtimeAllowance ?? 0),
+    travelAllowance: Number(template?.travelAllowance ?? employee.travelAllowance ?? 0),
+    retroactiveSalary: Number(template?.retroactiveSalary ?? employee.retroactiveSalary ?? 0),
+    socialSecurityBase: Number(template?.socialSecurityBase ?? employee.socialSecurityBase ?? 0),
+    tax: Number(template?.tax ?? employee.tax ?? 0),
+    absenceDeductionPerDay: Number(template?.absenceDeductionPerDay ?? 0),
+    housingFundBase: Number(template?.housingFundBase ?? 0),
+    companyHousingFundRate: Number(template?.companyHousingFundRate ?? 0),
+    personalHousingFundRate: Number(template?.personalHousingFundRate ?? 0),
+    fixedSalary: Number(template?.basicSalary ?? employee.basicSalary ?? 0) + Number(template?.performanceSalary ?? employee.performanceSalary ?? 0),
     salaryApprover: employee.salaryApprover || employee.approver || '',
     leader: employee.leader || '',
     employeeStatus: employee.status,
@@ -965,7 +1075,10 @@ function buildSalaryTemplateRow(employee: OaRecord, sequenceNo: number): OaRecor
     orgRecordId: employee.id,
     sourceEmployee: employee,
     linkedSalaryId: linkedSalary?.id,
+    templateStatus: template ? '已设定岗位模板' : '未设定岗位模板',
   }
+  recalculateSalary(row)
+  return row
 }
 
 function matchesSalaryTemplateFilter(row: OaRecord) {
@@ -979,42 +1092,6 @@ function matchesSalaryTemplateFilter(row: OaRecord) {
   if (keyword && !Object.values(row).some(value => String(value ?? '').includes(keyword)))
     return false
   return true
-}
-
-function syncSalaryRowsFromOrg() {
-  const { financialYear, financialMonth } = currentSalaryPeriod.value
-  const activeEmployees = orgEmployees.value.filter(row => row.status === '在职' && row.companyName)
-  activeEmployees.forEach((employee, index) => {
-    const rowIndex = moduleProfiles.salary.rows.findIndex(row =>
-      row.companyName === employee.companyName
-      && row.financialYear === financialYear
-      && row.financialMonth === financialMonth
-      && row.employeeName === employee.name,
-    )
-    const baseRecord = buildSalaryRecordFromEmployee(employee, financialYear, financialMonth, index + 1)
-    if (rowIndex > -1) {
-      const current = moduleProfiles.salary.rows[rowIndex]
-      if (!['待审批', '审批通过', '已发放', '已归档', '已作废'].includes(current.status)) {
-        Object.assign(current, {
-          companyName: baseRecord.companyName,
-          department: baseRecord.department,
-          position: baseRecord.position,
-          basicSalary: baseRecord.basicSalary,
-          performanceSalary: baseRecord.performanceSalary,
-          senioritySalary: baseRecord.senioritySalary,
-          overtimeAllowance: baseRecord.overtimeAllowance,
-          travelAllowance: baseRecord.travelAllowance,
-          retroactiveSalary: baseRecord.retroactiveSalary,
-          socialSecurityBase: baseRecord.socialSecurityBase,
-          tax: baseRecord.tax,
-        })
-        recalculateSalary(current)
-      }
-    }
-    else {
-      moduleProfiles.salary.rows.unshift(baseRecord)
-    }
-  })
 }
 
 function resetOrgForm(type: '部门' | '岗位' | '员工', record?: OaRecord) {
@@ -1131,6 +1208,8 @@ function validateOrgForm(record: OaRecord) {
 }
 
 async function saveOrgForm() {
+  if (saving.value)
+    return
   if (!validateOrgForm(orgForm))
     return
   const payload: OaRecord = {
@@ -1146,8 +1225,8 @@ async function saveOrgForm() {
   else
     moduleProfiles.org.rows.unshift(payload)
   selectedOrgKey.value = payload.orgType === '部门' ? payload.code : selectedOrgKey.value
-  orgFormOpen.value = false
   await persistOaModuleState(orgFormMode.value === 'create' ? '新增成功' : '保存成功')
+  orgFormOpen.value = false
 }
 
 function deleteOrgRecord(record: OaRecord) {
@@ -1176,8 +1255,10 @@ function openRoleModal(record: OaRecord) {
 }
 
 async function saveRoleAssignment() {
-  roleModalOpen.value = false
+  if (saving.value)
+    return
   await persistOaModuleState('角色权限已更新')
+  roleModalOpen.value = false
 }
 
 function openApproverModal(record: OaRecord) {
@@ -1186,14 +1267,16 @@ function openApproverModal(record: OaRecord) {
 }
 
 async function saveApproverAssignment() {
+  if (saving.value)
+    return
   const record = orgActionRecord.value
   if (!record)
     return
   const approverNames = [record.approver, record.financeApprover, record.adminApprover, record.vehicleApprover, record.salaryApprover].filter(Boolean)
   if (approverNames.some(name => orgEmployees.value.some(row => row.name === name && row.status !== '在职')))
     return message.warning('离职/停用员工不能作为审批人')
-  approverModalOpen.value = false
   await persistOaModuleState('审批关系已更新')
+  approverModalOpen.value = false
 }
 
 function adjustOrgField(record: OaRecord, field: 'parentDepartment' | 'position') {
@@ -1290,29 +1373,29 @@ function receivableCards(list: OaRecord[]): SummaryCardItem[] {
 }
 
 function cashCards(list: OaRecord[]): SummaryCardItem[] {
-  const cash = latestCashBalance(list.filter(row => row.accountType === '现金账户'))
-  const bank = latestCashBalance(list.filter(row => row.accountType === '银行账户'))
+  const cashBalanceRows = cashBalanceRecords.value
+  const totalBalance = cashBalanceRows.length
+    ? cashBalanceRows.reduce((total, row) => total + Number(row.balance_amount || 0), 0)
+    : latestCashBalance(list)
   const metrics = calculateFinanceDashboardMetrics(list)
   return [
-    { label: '现金余额', value: money(cash), hint: '现金账户', tone: 'success' },
-    { label: '银行余额', value: money(bank), hint: '银行账户', tone: 'success' },
+    { label: '现金总余额', value: money(totalBalance), hint: '全部主体账户汇总', tone: 'success' },
+    { label: '主体数量', value: new Set(cashBalanceRows.map(row => row.company_name)).size, hint: '公司/主体数', tone: 'default' },
+    { label: '银行账户数量', value: new Set(cashBalanceRows.map(row => `${row.bank_name}-${row.account_no_tail}`)).size, hint: '余额账户数', tone: 'default' },
     { label: '本月收入', value: money(metrics.actualIncome), hint: '实际收入流水', tone: 'primary' },
     { label: '本月支出', value: money(metrics.actualExpense), hint: '实际支出流水', tone: 'danger' },
-    { label: '净现金流', value: money(metrics.netCashFlow), hint: '实际收入-实际支出', tone: metrics.netCashFlow >= 0 ? 'success' : 'warning' },
     { label: '待处理流水', value: count(list, row => /异常|待审批|待支付|银行处理中|支付失败|未认领|部分认领/.test(row.status)), hint: '支付、异常或未完成认领', tone: 'warning' },
   ]
 }
 
 function salaryCards(list: OaRecord[]): SummaryCardItem[] {
+  const companyCost = sum(list, 'grossSalary') + sum(list, 'companySocialSecurityTotal') + sum(list, 'companyHousingFund')
+  const paidCount = count(list, row => row.payStatus === '已发放')
   return [
-    { label: '本月工资总额', value: money(sum(list, 'totalAmount')), hint: '合计金额汇总', tone: 'primary' },
-    { label: '应发工资总额', value: money(sum(list, 'grossSalary')), hint: '基本+绩效', tone: 'default' },
-    { label: '实发工资总额', value: money(sum(list, 'netSalary')), hint: '扣社保和个税后', tone: 'success' },
-    { label: '公司社保总额', value: money(sum(list, 'companySocialSecurityTotal')), hint: '公司缴纳部分', tone: 'warning' },
-    { label: '个人社保总额', value: money(sum(list, 'personalSocialSecurityTotal')), hint: '个人缴纳部分', tone: 'warning' },
-    { label: '代扣个税总额', value: money(sum(list, 'tax')), hint: '个税合计', tone: 'danger' },
-    { label: '发薪人数', value: new Set(list.map(row => `${row.companyName}-${row.employeeName}`)).size, hint: '按公司员工去重', tone: 'primary' },
-    { label: '待审批工资数', value: count(list, row => row.status === '待审批'), hint: '待 OA 审批', tone: 'warning' },
+    { label: '应发工资', value: money(sum(list, 'grossSalary')), hint: '固定工资、考勤及奖金补贴', tone: 'primary' },
+    { label: '实发工资', value: money(sum(list, 'netSalary')), hint: '扣除社保、公积金和个税后', tone: 'success' },
+    { label: '公司用工成本', value: money(companyCost), hint: '应发工资及公司缴费合计', tone: 'warning' },
+    { label: '核算进度', value: `${paidCount}/${list.length}`, hint: '已发放人数 / 本月人数', tone: paidCount === list.length && list.length > 0 ? 'success' : 'default' },
   ]
 }
 
@@ -1381,8 +1464,10 @@ function displayCell(record: OaRecord, dataIndex: string) {
   return record[dataIndex] ?? '-'
 }
 
-function enhanceColumns(columns: Array<Record<string, any>>) {
+function enhanceColumns(columns: Array<Record<string, any>>): Array<Record<string, any>> {
   return columns.map((column) => {
+    if (Array.isArray(column.children))
+      return { ...column, children: enhanceColumns(column.children) }
     const dataIndex = columnKey(column.dataIndex)
     const enhanced: Record<string, any> = {
       ...column,
@@ -1484,41 +1569,59 @@ function openOrgEmployeeFromTemplate(record: OaRecord) {
   detailOpen.value = true
 }
 
-async function generateSalaryFromTemplate(record: OaRecord) {
-  const employee = record.sourceEmployee || orgEmployees.value.find(row => row.code === record.employeeId)
-  if (!employee)
-    return message.warning('未找到关联的组织架构人员')
-  if (employee.status !== '在职')
-    return message.warning('离职或停用人员不能生成工资')
-
-  const { financialYear, financialMonth } = currentSalaryPeriod.value
-  const rowIndex = moduleProfiles.salary.rows.findIndex(row =>
-    row.companyName === employee.companyName
-    && row.financialYear === financialYear
-    && row.financialMonth === financialMonth
-    && row.employeeName === employee.name,
-  )
-  const baseRecord = buildSalaryRecordFromEmployee(employee, financialYear, financialMonth, rowIndex > -1 ? moduleProfiles.salary.rows[rowIndex].sequenceNo || rowIndex + 1 : moduleProfiles.salary.rows.length + 1)
-
-  if (rowIndex > -1) {
-    const current = moduleProfiles.salary.rows[rowIndex]
-    if (['待审批', '审批通过', '已发放', '已归档', '已作废'].includes(current.status) || current.payStatus === '已发放')
-      return message.warning('该人员当月工资已进入审批或发放流程，不能覆盖')
-    moduleProfiles.salary.rows[rowIndex] = { ...baseRecord, id: current.id, code: current.code }
-    await persistOaModuleState('已按人员工资模板同步工资记录')
-  }
-  else {
-    moduleProfiles.salary.rows.unshift(baseRecord)
-    await persistOaModuleState('已按人员工资模板生成当月工资')
-  }
-  salaryActiveTab.value = 'records'
+function openSalaryTemplateEdit(record: OaRecord) {
+  Object.assign(salaryTemplateForm, {
+    employeeId: record.employeeId,
+    employeeName: record.employeeName,
+    companyName: record.companyName,
+    department: record.department,
+    position: record.position,
+    basicSalary: Number(record.basicSalary || 0),
+    performanceSalary: Number(record.performanceSalary || 0),
+    senioritySalary: Number(record.senioritySalary || 0),
+    overtimeAllowance: Number(record.overtimeAllowance || 0),
+    travelAllowance: Number(record.travelAllowance || 0),
+    retroactiveSalary: Number(record.retroactiveSalary || 0),
+    socialSecurityBase: Number(record.socialSecurityBase || 0),
+    tax: Number(record.tax || 0),
+    absenceDeductionPerDay: Number(record.absenceDeductionPerDay || 0),
+    housingFundBase: Number(record.housingFundBase || 0),
+    companyHousingFundRatePercent: Number(record.companyHousingFundRate || 0) * 100,
+    personalHousingFundRatePercent: Number(record.personalHousingFundRate || 0) * 100,
+    effectiveDate: dayjs().format('YYYY-MM-DD'),
+    remark: '',
+  })
+  recalculateSalary(salaryTemplateForm as OaRecord)
+  salaryTemplateOpen.value = true
 }
 
-function openSalaryTemplateEdit(record: OaRecord) {
-  const employee = record.sourceEmployee || orgEmployees.value.find(row => row.code === record.employeeId)
-  if (!employee)
-    return message.warning('未找到关联的组织架构人员')
-  openOrgEdit(employee)
+async function saveSalaryDirectEntry() {
+  const targets = salaryVisibleRows.value.filter(row => !['已锁定', '已发放', '已归档'].includes(String(row.status)))
+  targets.forEach(row => recalculateSalary(row))
+  if (!targets.length)
+    return message.warning('当前没有可保存的工资记录')
+  await persistOaModuleState(`已保存 ${targets.length} 人工资录入`, 'salary')
+}
+
+async function saveSalaryTemplate() {
+  if (!salaryTemplateForm.position)
+    return message.warning('岗位不能为空')
+  salaryTemplateSaving.value = true
+  try {
+    await saveSalaryTemplateApi({ ...salaryTemplateForm, housingFundBase: 0, companyHousingFundRatePercent: 0, personalHousingFundRatePercent: 0 })
+    salaryTemplateOpen.value = false
+    await loadOaModuleState()
+    message.success('岗位工资模板已保存，工资明细已同步')
+  }
+  finally {
+    salaryTemplateSaving.value = false
+  }
+}
+
+function recalculateSalaryTemplate() {
+  salaryTemplateForm.companyHousingFundRate = Number(salaryTemplateForm.companyHousingFundRatePercent || 0) / 100
+  salaryTemplateForm.personalHousingFundRate = Number(salaryTemplateForm.personalHousingFundRatePercent || 0) / 100
+  recalculateSalary(salaryTemplateForm as OaRecord)
 }
 
 function openEdit(record: OaRecord) {
@@ -1526,56 +1629,8 @@ function openEdit(record: OaRecord) {
   editOpen.value = true
 }
 
-function openCreateSalary() {
-  const currentMonth = financialPeriodFilter.financialMonth || dayjs().month() + 1
-  const currentYear = financialPeriodFilter.financialYear || dayjs().year()
-  editingRecord.value = {
-    id: `salary-${Date.now()}`,
-    code: `SAL${currentYear}${String(currentMonth).padStart(2, '0')}${String(moduleProfiles.salary.rows.length + 1).padStart(4, '0')}`,
-    companyName: queryModel.companyName || '青海诚捷运输有限公司',
-    sequenceNo: moduleProfiles.salary.rows.length + 1,
-    employeeName: '',
-    department: '',
-    position: '',
-    financialYear: currentYear,
-    financialMonth: currentMonth,
-    attendanceDays: 31,
-    basicSalary: 0,
-    performanceSalary: 0,
-    grossSalary: 0,
-    attendanceSalary: 0,
-    senioritySalary: 0,
-    overtimeAllowance: 0,
-    travelAllowance: 0,
-    retroactiveSalary: 0,
-    totalAmount: 0,
-    socialSecurityBase: 0,
-    companyPension: 0,
-    companyMedical: 0,
-    companyInjury: 0,
-    companyUnemployment: 0,
-    companySocialSecurityTotal: 0,
-    personalPension: 0,
-    personalMedical: 0,
-    personalInjury: 0,
-    personalUnemployment: 0,
-    personalSocialSecurityTotal: 0,
-    tax: 0,
-    netSalary: 0,
-    cashPayment: '',
-    remark: '',
-    payStatus: '未发放',
-    status: '草稿',
-    date: `${currentYear}-${String(currentMonth).padStart(2, '0')}-01`,
-    createdBy: currentUser.value?.id ?? 1,
-    approverId: 1,
-  }
-  recalculateSalary(editingRecord.value)
-  editOpen.value = true
-}
-
 function canInlineEditSalary(record: OaRecord) {
-  return activeKey.value === 'salary' && !['审批通过', '已发放', '已作废', '已归档'].includes(record.status) && record.payStatus !== '已发放'
+  return activeKey.value === 'salary' && !['审批通过', '已锁定', '已发放', '已作废', '已归档'].includes(record.status) && record.payStatus !== '已发放'
 }
 
 function startSalaryInlineEdit(record: OaRecord) {
@@ -1598,6 +1653,7 @@ function cancelSalaryInlineEdit(record: OaRecord) {
 async function saveSalaryInlineEdit(record: OaRecord) {
   if (!validateRecord(record))
     return
+  prepareCumulativeSalary(record)
   recalculateSalary(record)
   salaryInlineEditingId.value = ''
   salaryInlineSnapshot.value = undefined
@@ -1605,6 +1661,8 @@ async function saveSalaryInlineEdit(record: OaRecord) {
 }
 
 async function saveEdit() {
+  if (saving.value)
+    return
   if (!editingRecord.value)
     return
   const record = editingRecord.value
@@ -1617,8 +1675,8 @@ async function saveEdit() {
     list[index] = record
   else
     list.unshift(record)
-  editOpen.value = false
   await persistOaModuleState('保存成功')
+  editOpen.value = false
 }
 
 async function deleteRecord(record: OaRecord) {
@@ -1638,10 +1696,37 @@ const openPayableOptions = computed(() => moduleProfiles.receivable.rows.filter(
 ))
 
 const receiptAllocationTotal = computed(() => receiptAllocationRows.value.reduce((total, row) => total + Number(row.amount || 0), 0))
+const receiptAllocationRemaining = computed(() => Math.max(
+  Number(allocatingReceipt.value?.unrecognizedAmount || 0) - receiptAllocationTotal.value,
+  0,
+))
+const receiptAccountBalanceAfterRegistration = computed(() =>
+  Number(selectedReceiptCashAccount.value?.balance_amount || 0) + Number(receiptForm.amount || 0),
+)
+const receiptAllocationAccountBalanceAfterPosting = computed(() => {
+  const account = selectedReceiptAllocationCashAccount.value
+  const receipt = allocatingReceipt.value
+  if (!account || !receipt)
+    return 0
+  return Number(account.balance_amount || 0) + (receipt.balancePostedAt ? 0 : Number(receipt.incomeAmount || 0))
+})
+const activeCashBalanceMovements = computed(() =>
+  Array.isArray(activeCashBalance.value?.balanceMovements) ? activeCashBalance.value!.balanceMovements! : [],
+)
 const paymentAllocationTotal = computed(() => paymentAllocationRows.value.reduce((total, row) => total + Number(row.amount || 0), 0))
+
+function receiptAllocationLimit(receivableId: string) {
+  const receivable = openReceivableOptions.value.find(item => item.id === receivableId)
+  return Number(receivable?.unpaidAmount || 0)
+}
+
+function receiptAllocationReceivable(receivableId: string) {
+  return openReceivableOptions.value.find(item => item.id === receivableId)
+}
 
 function resetReceiptForm() {
   Object.assign(receiptForm, {
+    cashBalanceId: '',
     accountName: '',
     amount: 0,
     receiptDate: dayjs().format('YYYY-MM-DD'),
@@ -1653,13 +1738,47 @@ function resetReceiptForm() {
   })
 }
 
+function cashBalanceOptionLabel(account: CashBalanceRecord) {
+  return [...new Set([
+    account.company_name,
+    account.bank_name,
+    account.account_name,
+    account.account_no_tail ? `账号 ${account.account_no_tail}` : '',
+  ].filter(Boolean))].join(' · ')
+}
+
+function cashBalanceCompactLabel(account: CashBalanceRecord) {
+  return [
+    account.account_no_tail ? `账号 ${account.account_no_tail}` : '',
+    account.bank_name,
+    account.account_name,
+  ].filter(Boolean).join(' · ')
+}
+
+function handleReceiptCashAccountChange(id: unknown) {
+  if (typeof id !== 'string' && typeof id !== 'number')
+    return
+  const account = cashBalanceRecords.value.find(row => String(row.id) === String(id))
+  receiptForm.accountName = account?.bank_name || account?.account_name || ''
+}
+
+function inferReceiptCashBalanceId(receipt: OaRecord) {
+  if (receipt.cashBalanceId && cashBalanceRecords.value.some(row => String(row.id) === String(receipt.cashBalanceId)))
+    return String(receipt.cashBalanceId)
+  const candidates = cashBalanceRecords.value.filter(account =>
+    [account.account_name, account.bank_name].some(value => String(value || '').trim() === String(receipt.accountName || '').trim())
+    || (receipt.accountNo && String(account.account_no_tail) === String(receipt.accountNo)),
+  )
+  return candidates.length === 1 ? candidates[0].id : ''
+}
+
 function openReceiptModal() {
   resetReceiptForm()
   receiptOpen.value = true
 }
 
 async function saveReceipt() {
-  if (!receiptForm.accountName.trim() || !receiptForm.payerName.trim() || !receiptForm.bankSerialNo.trim())
+  if (!receiptForm.cashBalanceId || !receiptForm.accountName.trim() || !receiptForm.payerName.trim() || !receiptForm.bankSerialNo.trim())
     return message.warning('请完整填写收款账户、付款方和银行流水号')
   if (!receiptForm.receiptDate || Number(receiptForm.amount) <= 0)
     return message.warning('请填写有效到账日期和来款金额')
@@ -1685,6 +1804,8 @@ function addReceiptAllocationRow() {
 function openReceiptAllocation(record: OaRecord) {
   allocatingReceipt.value = record
   receiptAllocationRows.value = [{ receivableId: '', amount: 0, remark: '' }]
+  receiptAllocationCashBalanceId.value = inferReceiptCashBalanceId(record)
+  receiptAllocationBatchId.value = `RA-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
   receiptAllocationOpen.value = true
 }
 
@@ -1694,16 +1815,25 @@ async function saveReceiptAllocation() {
     return
   if (receiptAllocationRows.value.some(row => !row.receivableId || Number(row.amount) <= 0))
     return message.warning('请选择应收单并填写有效核销金额')
+  if (!receiptAllocationCashBalanceId.value)
+    return message.warning('请选择核销对应的收款账户')
   if (new Set(receiptAllocationRows.value.map(row => row.receivableId)).size !== receiptAllocationRows.value.length)
     return message.warning('同一应收单请合并为一行核销')
+  if (receiptAllocationRows.value.some(row => Number(row.amount) > receiptAllocationLimit(row.receivableId)))
+    return message.warning('核销金额不能超过对应应收单的未收金额')
   if (receiptAllocationTotal.value > Number(receipt.unrecognizedAmount || 0))
     return message.warning('核销合计不能超过未认领金额')
   saving.value = true
   try {
-    await allocateReceiptApi(receipt.id, receiptAllocationRows.value)
+    await allocateReceiptApi(receipt.id, {
+      allocations: receiptAllocationRows.value,
+      cashBalanceId: receiptAllocationCashBalanceId.value,
+      allocationBatchId: receiptAllocationBatchId.value,
+      handler: userStore.nickname || currentUser.value?.nickname || '',
+    })
     receiptAllocationOpen.value = false
     await loadOaModuleState()
-    message.success('来款核销成功')
+    message.success(receipt.balancePostedAt ? '来款核销成功' : '来款核销成功，到账金额已计入对应账户')
   }
   catch (error: any) {
     message.error(error?.message || '来款核销失败')
@@ -1716,7 +1846,10 @@ async function saveReceiptAllocation() {
 function resetPaymentForm(record?: OaRecord) {
   Object.assign(paymentForm, {
     paymentRequestNo: `PAY-${dayjs().format('YYYYMMDDHHmmss')}-${String(Date.now()).slice(-4)}`,
+    cashBalanceId: '',
+    companyName: '',
     accountName: '',
+    accountNo: '',
     paymentDate: dayjs().format('YYYY-MM-DD'),
     payeeName: record?.counterparty || '',
     accountType: '银行账户',
@@ -1733,17 +1866,55 @@ function openPaymentModal(record?: OaRecord) {
   paymentOpen.value = true
 }
 
+function selectPaymentCompany() {
+  paymentForm.cashBalanceId = ''
+  paymentForm.accountName = ''
+  paymentForm.accountNo = ''
+}
+
+function selectPaymentAccount(id: unknown) {
+  const account = cashBalanceRecords.value.find(row => row.id === String(id || ''))
+  paymentForm.accountName = account?.account_no_tail || ''
+  paymentForm.accountNo = account?.account_no_tail || ''
+}
+
 function addPaymentAllocationRow() {
   paymentAllocationRows.value.push({ payableId: '', amount: 0, remark: '' })
 }
 
+function validatePaymentInstructionForm() {
+  if (!paymentForm.paymentRequestNo.trim() || !paymentForm.cashBalanceId || !paymentForm.companyName.trim() || !paymentForm.accountName.trim() || !paymentForm.payeeName.trim()) {
+    message.warning('请完整选择主体、账号并填写付款请求号和收款方')
+    return false
+  }
+  if (!paymentForm.paymentDate || paymentAllocationRows.value.some(row => !row.payableId || Number(row.amount) <= 0)) {
+    message.warning('请选择应付单并填写有效付款金额')
+    return false
+  }
+  if (selectedPaymentCashAccount.value && paymentAllocationTotal.value > Number(selectedPaymentCashAccount.value.balance_amount || 0)) {
+    message.warning('付款金额超过所选账号的现金余额')
+    return false
+  }
+  if (new Set(paymentAllocationRows.value.map(row => row.payableId)).size !== paymentAllocationRows.value.length) {
+    message.warning('同一应付单请合并为一行付款')
+    return false
+  }
+  return true
+}
+
+function confirmPaymentInstruction() {
+  if (!validatePaymentInstructionForm())
+    return
+  Modal.confirm({
+    title: '再次确认付款',
+    content: `${paymentForm.companyName} · ${paymentForm.accountNo}，向 ${paymentForm.payeeName} 付款 ${money(paymentAllocationTotal.value)}。确认后将在现金管理生成待支付记录。`,
+    okText: '确认并生成付款',
+    cancelText: '返回修改',
+    onOk: savePaymentInstruction,
+  })
+}
+
 async function savePaymentInstruction() {
-  if (!paymentForm.paymentRequestNo.trim() || !paymentForm.accountName.trim() || !paymentForm.payeeName.trim())
-    return message.warning('请完整填写付款请求号、付款账户和收款方')
-  if (!paymentForm.paymentDate || paymentAllocationRows.value.some(row => !row.payableId || Number(row.amount) <= 0))
-    return message.warning('请选择应付单并填写有效付款金额')
-  if (new Set(paymentAllocationRows.value.map(row => row.payableId)).size !== paymentAllocationRows.value.length)
-    return message.warning('同一应付单请合并为一行付款')
   saving.value = true
   try {
     await createPaymentApi({
@@ -1752,7 +1923,7 @@ async function savePaymentInstruction() {
       handler: userStore.nickname || currentUser.value?.nickname || '',
     })
     paymentOpen.value = false
-    message.success('付款指令已创建，等待银行支付确认')
+    message.success('付款已确认，已在现金管理生成待支付记录')
     await router.push('/oa-approval/cash')
     await loadOaModuleState()
   }
@@ -1833,7 +2004,7 @@ async function savePaymentFailure() {
 
 function resetCashBalanceForm() {
   editingBalanceId.value = ''
-  cashBalanceForm.balance_date = currentCashBalanceDate.value
+  cashBalanceForm.balance_date = dayjs().format('YYYY-MM-DD')
   cashBalanceForm.company_name = ''
   cashBalanceForm.bank_name = ''
   cashBalanceForm.account_name = ''
@@ -1855,9 +2026,14 @@ function openCashBalanceModal(record?: CashBalanceRecord) {
   cashBalanceOpen.value = true
 }
 
+function openCashBalanceHistory(record: CashBalanceRecord) {
+  activeCashBalance.value = record
+  cashBalanceHistoryOpen.value = true
+}
+
 function validateCashBalanceForm(record: typeof cashBalanceForm | CashBalanceDraft) {
-  if (!record.balance_date || !record.company_name || !record.bank_name || !record.account_name || !record.account_no_tail) {
-    message.warning('请填写统计日期、主体、银行、账户和账号尾号')
+  if (!record.company_name || !record.bank_name || !record.account_name || !record.account_no_tail) {
+    message.warning('请填写主体、银行、账户名称和账号')
     return false
   }
   if (!dayjs(record.balance_date).isValid()) {
@@ -1872,17 +2048,18 @@ function validateCashBalanceForm(record: typeof cashBalanceForm | CashBalanceDra
 }
 
 async function saveCashBalance() {
+  if (saving.value)
+    return
   if (!validateCashBalanceForm(cashBalanceForm))
     return
   const duplicate = cashBalanceRecords.value.some(row =>
     row.id !== editingBalanceId.value
-    && row.balance_date === cashBalanceForm.balance_date
     && row.company_name === cashBalanceForm.company_name
     && row.bank_name === cashBalanceForm.bank_name
     && row.account_no_tail === cashBalanceForm.account_no_tail,
   )
   if (duplicate)
-    return message.warning('同一日期、主体、银行和账号尾号已存在余额记录')
+    return message.warning('同一主体、银行和账号已存在余额记录')
   const existingRecord = cashBalanceRecords.value.find(row => row.id === editingBalanceId.value)
   const now = dayjs().format('YYYY-MM-DD HH:mm')
   const payload: CashBalanceRecord = {
@@ -1898,15 +2075,15 @@ async function saveCashBalance() {
     created_at: existingRecord?.created_at ?? now,
     updated_by: currentUser.value?.id ?? 1,
     updated_at: now,
+    balanceMovements: existingRecord?.balanceMovements,
   }
   const index = cashBalanceRecords.value.findIndex(row => row.id === payload.id)
   if (index > -1)
     cashBalanceRecords.value[index] = payload
   else
     cashBalanceRecords.value.unshift(payload)
-  cashBalanceQuery.balance_date = payload.balance_date
-  cashBalanceOpen.value = false
   await persistOaModuleState(editingBalanceId.value ? '余额记录已更新' : '余额记录已新增', 'cashBalance')
+  cashBalanceOpen.value = false
 }
 
 async function deleteCashBalance(record: CashBalanceRecord) {
@@ -1921,9 +2098,9 @@ async function deleteCashBalance(record: CashBalanceRecord) {
 
 function resetBatchRows() {
   batchBalanceRows.value = [
-    { balance_date: currentCashBalanceDate.value, company_name: '', bank_name: '', account_name: '', account_no_tail: '', balance_amount: 0, remark: '', created_by: currentUser.value?.id ?? 1, created_at: dayjs().format('YYYY-MM-DD HH:mm') },
-    { balance_date: currentCashBalanceDate.value, company_name: '', bank_name: '', account_name: '', account_no_tail: '', balance_amount: 0, remark: '', created_by: currentUser.value?.id ?? 1, created_at: dayjs().format('YYYY-MM-DD HH:mm') },
-    { balance_date: currentCashBalanceDate.value, company_name: '', bank_name: '', account_name: '', account_no_tail: '', balance_amount: 0, remark: '', created_by: currentUser.value?.id ?? 1, created_at: dayjs().format('YYYY-MM-DD HH:mm') },
+    { balance_date: dayjs().format('YYYY-MM-DD'), company_name: '', bank_name: '', account_name: '', account_no_tail: '', balance_amount: 0, remark: '', created_by: currentUser.value?.id ?? 1, created_at: dayjs().format('YYYY-MM-DD HH:mm') },
+    { balance_date: dayjs().format('YYYY-MM-DD'), company_name: '', bank_name: '', account_name: '', account_no_tail: '', balance_amount: 0, remark: '', created_by: currentUser.value?.id ?? 1, created_at: dayjs().format('YYYY-MM-DD HH:mm') },
+    { balance_date: dayjs().format('YYYY-MM-DD'), company_name: '', bank_name: '', account_name: '', account_no_tail: '', balance_amount: 0, remark: '', created_by: currentUser.value?.id ?? 1, created_at: dayjs().format('YYYY-MM-DD HH:mm') },
   ]
 }
 
@@ -1935,7 +2112,7 @@ function openBatchBalanceModal() {
 }
 
 function addBatchBalanceRow() {
-  batchBalanceRows.value.push({ balance_date: currentCashBalanceDate.value, company_name: '', bank_name: '', account_name: '', account_no_tail: '', balance_amount: 0, remark: '', created_by: currentUser.value?.id ?? 1, created_at: dayjs().format('YYYY-MM-DD HH:mm') })
+  batchBalanceRows.value.push({ balance_date: dayjs().format('YYYY-MM-DD'), company_name: '', bank_name: '', account_name: '', account_no_tail: '', balance_amount: 0, remark: '', created_by: currentUser.value?.id ?? 1, created_at: dayjs().format('YYYY-MM-DD HH:mm') })
 }
 
 function removeBatchBalanceRow(index: number) {
@@ -1943,7 +2120,7 @@ function removeBatchBalanceRow(index: number) {
 }
 
 function validateBatchRows() {
-  const validRows = batchBalanceRows.value.filter(row => row.company_name || row.bank_name || row.account_name || row.account_no_tail || Number(row.balance_amount) > 0)
+  const validRows = batchBalanceRows.value.filter(row => row.company_name || row.bank_name || row.account_no_tail || Number(row.balance_amount) > 0)
   if (!validRows.length) {
     message.warning('请至少录入一条余额记录')
     return []
@@ -1952,9 +2129,9 @@ function validateBatchRows() {
   for (const row of validRows) {
     if (!validateCashBalanceForm(row))
       return []
-    const key = `${row.balance_date}-${row.company_name}-${row.bank_name}-${row.account_no_tail}`
+    const key = `${row.company_name}-${row.bank_name}-${row.account_no_tail}`
     if (uniqueKeys.has(key)) {
-      message.warning('批量录入中存在重复的主体、银行和账号尾号')
+      message.warning('批量录入中存在重复的主体、银行和账号')
       return []
     }
     uniqueKeys.add(key)
@@ -1969,13 +2146,14 @@ function openBatchConfirm() {
 }
 
 async function submitBatchBalances() {
+  if (saving.value)
+    return
   const validRows = validateBatchRows()
   if (!validRows.length)
     return
   validRows.forEach((row, index) => {
     const existingIndex = cashBalanceRecords.value.findIndex(item =>
-      item.balance_date === row.balance_date
-      && item.company_name === row.company_name
+      item.company_name === row.company_name
       && item.bank_name === row.bank_name
       && item.account_no_tail === row.account_no_tail,
     )
@@ -1984,21 +2162,22 @@ async function submitBatchBalances() {
     const payload: CashBalanceRecord = {
       ...row,
       id: existingRecord?.id ?? `cb-batch-${Date.now()}-${index}`,
+      account_name: row.account_name,
       balance_amount: Number(row.balance_amount || 0),
       created_by: existingRecord?.created_by ?? row.created_by ?? currentUser.value?.id ?? 1,
       created_at: existingRecord?.created_at ?? now,
       updated_by: currentUser.value?.id ?? 1,
       updated_at: now,
+      balanceMovements: existingRecord?.balanceMovements,
     }
     if (existingIndex > -1)
       cashBalanceRecords.value[existingIndex] = payload
     else
       cashBalanceRecords.value.unshift(payload)
   })
-  cashBalanceQuery.balance_date = validRows[0].balance_date
+  await persistOaModuleState('现金余额记录已保存', 'cashBalance')
   batchConfirmOpen.value = false
   batchBalanceOpen.value = false
-  await persistOaModuleState(`已生成 ${validRows[0].balance_date} 现金余额记录`, 'cashBalance')
 }
 
 async function updateStatus(record: OaRecord, status: string, successText: string) {
@@ -2124,41 +2303,56 @@ function recalculateRecord(record: OaRecord) {
 }
 
 function recalculateSalary(record: OaRecord) {
-  const round = (value: number) => Number(value.toFixed(2))
-  const fullGrossSalary = Number(record.basicSalary ?? 0) + Number(record.performanceSalary ?? 0)
-  const attendanceDays = Math.min(31, Math.max(0, Number(record.attendanceDays ?? 31)))
-  const socialSecurityBase = Number(record.socialSecurityBase ?? 0)
-  record.attendanceDays = attendanceDays
-  record.grossSalary = round((fullGrossSalary / 31) * attendanceDays)
-  record.totalAmount = round(
-    Number(record.grossSalary ?? 0)
-    + Number(record.attendanceSalary ?? 0)
-    + Number(record.senioritySalary ?? 0)
-    + Number(record.overtimeAllowance ?? 0)
-    + Number(record.travelAllowance ?? 0)
-    + Number(record.retroactiveSalary ?? 0),
+  calculateSalary(record)
+  record.allowanceBonus = Number(record.senioritySalary || 0) + Number(record.subsidy || 0) + Number(record.bonus || 0) + Number(record.overtimePay || 0)
+}
+
+function prepareCumulativeSalary(record: OaRecord) {
+  const previous = moduleProfiles.salary.rows.filter(row =>
+    row.id !== record.id
+    && row.employeeId === record.employeeId
+    && row.financialYear === record.financialYear
+    && Number(row.financialMonth || 0) < Number(record.financialMonth || 0),
   )
-  record.companyPension = round(socialSecurityBase * 0.16)
-  record.companyMedical = round(socialSecurityBase * 0.069)
-  record.companyInjury = round(socialSecurityBase * 0.00575)
-  record.companyUnemployment = round(socialSecurityBase * 0.005)
-  record.companySocialSecurityTotal = round(
-    Number(record.companyPension ?? 0)
-    + Number(record.companyMedical ?? 0)
-    + Number(record.companyInjury ?? 0)
-    + Number(record.companyUnemployment ?? 0),
-  )
-  record.personalPension = round(socialSecurityBase * 0.08)
-  record.personalMedical = round(socialSecurityBase * 0.002)
-  record.personalInjury = round(Number(record.personalInjury ?? 0))
-  record.personalUnemployment = round(socialSecurityBase * 0.005)
-  record.personalSocialSecurityTotal = round(
-    Number(record.personalPension ?? 0)
-    + Number(record.personalMedical ?? 0)
-    + Number(record.personalInjury ?? 0)
-    + Number(record.personalUnemployment ?? 0),
-  )
-  record.netSalary = round(Number(record.totalAmount ?? 0) - Number(record.personalSocialSecurityTotal ?? 0) - Number(record.tax ?? 0))
+  record.cumulativePriorIncome = sum(previous, 'grossSalary')
+  record.cumulativePriorSocialFund = sum(previous, 'personalSocialSecurityTotal') + sum(previous, 'personalHousingFund')
+  record.cumulativeSpecialAdditionalDeduction = sum(previous, 'specialAdditionalDeduction')
+  record.cumulativeOtherPreTaxDeduction = sum(previous, 'otherPreTaxDeduction')
+  record.cumulativeTaxPaid = sum(previous, 'tax')
+}
+
+async function lockVisibleSalaries() {
+  const targets = salaryVisibleRows.value.filter(row => ['草稿', '待补录'].includes(String(row.status)))
+  if (!targets.length) {
+    message.warning('当前筛选范围没有可锁定的工资记录')
+    return
+  }
+  const incomplete = targets.filter(row => !row.companyName || !row.employeeName || !row.position || Number(row.actualAttendanceDays ?? row.attendanceDays ?? 0) <= 0)
+  const content = incomplete.length
+    ? `将锁定 ${targets.length} 人工资，其中 ${incomplete.length} 人存在公司、姓名、岗位或出勤天数未完成。锁定后只能按工资流程更正，是否继续？`
+    : `将锁定 ${targets.length} 人工资。锁定后不能直接编辑、删除或回退状态，是否继续？`
+  const snapshots = targets.map(row => ({ row, value: JSON.parse(JSON.stringify(row)) }))
+  Modal.confirm({
+    title: '确认锁定本月工资',
+    content,
+    okText: incomplete.length ? '仍然锁定' : '确认锁定',
+    cancelText: '返回检查',
+    okButtonProps: { danger: incomplete.length > 0 },
+    onOk: async () => {
+      try {
+        targets.forEach((row) => {
+          prepareCumulativeSalary(row)
+          recalculateSalary(row)
+          row.status = '已锁定'
+        })
+        await persistOaModuleState(`已锁定 ${targets.length} 人工资`, 'salary')
+      }
+      catch (error) {
+        snapshots.forEach(({ row, value }) => Object.assign(row, value))
+        throw error
+      }
+    },
+  })
 }
 
 function buildActions(record: OaRecord): RecordActionItem[] {
@@ -2170,14 +2364,35 @@ function buildActions(record: OaRecord): RecordActionItem[] {
     onClick: () => router.push({ path: '/oa-approval/center', query: { approvalInstanceId: record.approvalInstanceId } }),
   }
   if (activeKey.value === 'salary') {
-    const salaryLocked = ['审批通过', '已发放', '已作废'].includes(record.status) || record.payStatus === '已发放'
+    const salaryLocked = ['审批通过', '已锁定', '已发放', '已作废', '已归档'].includes(record.status) || record.payStatus === '已发放'
     return [
       approvalAction,
       { key: 'view', label: '查看', onClick: () => openDetail(record) },
+      { key: 'person-template', label: '工资模板', hidden: salaryLocked, onClick: () => openSalaryTemplateEdit(record) },
       { key: 'inline-edit', label: '表格填写', hidden: salaryInlineEditingId.value === record.id || salaryLocked, onClick: () => startSalaryInlineEdit(record) },
       { key: 'inline-save', label: '保存', hidden: salaryInlineEditingId.value !== record.id, onClick: () => saveSalaryInlineEdit(record) },
       { key: 'inline-cancel', label: '取消', hidden: salaryInlineEditingId.value !== record.id, onClick: () => cancelSalaryInlineEdit(record) },
       { key: 'edit', label: '编辑', hidden: salaryLocked, onClick: () => openEdit(record) },
+      {
+        key: 'lock',
+        label: '复核锁定',
+        hidden: !['草稿', '待补录'].includes(record.status),
+        confirm: true,
+        confirmTitle: '确定锁定该工资记录？锁定后不能直接编辑、删除或回退状态。',
+        onClick: async () => {
+          const snapshot = JSON.parse(JSON.stringify(record))
+          try {
+            prepareCumulativeSalary(record)
+            recalculateSalary(record)
+            record.status = '已锁定'
+            await persistOaModuleState('工资已锁定', 'salary')
+          }
+          catch (error) {
+            Object.assign(record, snapshot)
+            throw error
+          }
+        },
+      },
       { key: 'revoke', label: '撤回', hidden: record.status !== '待审批', confirm: true, confirmTitle: '确定撤回该工资审批？', onClick: () => updateStatus(record, '草稿', '已撤回') },
       {
         key: 'pay',
@@ -2190,7 +2405,6 @@ function buildActions(record: OaRecord): RecordActionItem[] {
         },
       },
       { key: 'archive', label: '归档', hidden: !['审批通过', '已发放'].includes(record.status), onClick: () => updateStatus(record, '已归档', '工资记录已归档') },
-      { key: 'void', label: '作废', hidden: record.status === '已作废', danger: true, confirm: true, confirmTitle: '确定作废该工资记录？', onClick: () => updateStatus(record, '已作废', '已作废') },
       { key: 'delete', label: '删除', hidden: record.payStatus === '已发放', danger: true, confirm: true, confirmTitle: '确定删除该工资记录？', onClick: () => deleteRecord(record) },
     ]
   }
@@ -2260,10 +2474,14 @@ function visibleRowActions(record: OaRecord) {
 }
 
 function inlineRowActions(record: OaRecord) {
+  if (activeKey.value === 'salary' && salaryActiveTab.value === 'records')
+    return []
   return visibleRowActions(record).slice(0, 3)
 }
 
 function moreRowActions(record: OaRecord) {
+  if (activeKey.value === 'salary' && salaryActiveTab.value === 'records')
+    return visibleRowActions(record)
   return visibleRowActions(record).slice(3)
 }
 
@@ -2277,7 +2495,6 @@ function handleQuery() {
   pagination.current = 1
   salaryInlineEditingId.value = ''
   salaryInlineSnapshot.value = undefined
-  message.success('查询完成')
 }
 
 function resetQuery() {
@@ -2286,210 +2503,26 @@ function resetQuery() {
   queryModel.companyName = undefined
   queryModel.payStatus = undefined
   queryModel.orgPosition = undefined
-  resetFinancialPeriodFilter()
+  resetFinancialPeriodFilter(salaryDefaultPeriod())
   pagination.current = 1
   salaryInlineEditingId.value = ''
   salaryInlineSnapshot.value = undefined
 }
 
-function toSalaryNumber(value: unknown) {
-  if (value === '' || value === undefined || value === null)
-    return 0
-  const number = Number(String(value).replace(/[,，¥￥\\s]/g, ''))
-  return Number.isFinite(number) ? Number(number.toFixed(2)) : 0
-}
-
-function findHeaderIndex(labels: string[], keyword: string) {
-  return labels.findIndex(label => label.includes(keyword))
-}
-
-function parseCompanyMonth(sheetName: string, title: string) {
-  const companyMap: Record<string, string> = {
-    诚捷: '青海诚捷运输有限公司',
-    诚域: '青海诚域能源有限公司',
-    诺锐: '青海诺锐新能源有限公司',
-  }
-  const titleMatch = title.match(/(青海.+?有限公司)(\\d{4})年(\\d{1,2})月/)
-  if (titleMatch) {
-    return {
-      companyName: titleMatch[1],
-      financialYear: Number(titleMatch[2]),
-      financialMonth: Number(titleMatch[3]),
-    }
-  }
-  const monthMatch = sheetName.match(/(\\d{1,2})月/)
-  const companyKey = Object.keys(companyMap).find(key => sheetName.includes(key))
-  return {
-    companyName: companyKey ? companyMap[companyKey] : '',
-    financialYear: 2026,
-    financialMonth: monthMatch ? Number(monthMatch[1]) : 0,
-  }
-}
-
-function parseSalaryWorkbook(workbook: XLSX.WorkBook) {
-  const records: OaRecord[] = []
-  const errors: string[] = []
-  workbook.SheetNames.forEach((sheetName) => {
-    if (!/\\d+月/.test(sheetName))
-      return
-    const worksheet = workbook.Sheets[sheetName]
-    const rows = XLSX.utils.sheet_to_json<any[]>(worksheet, { header: 1, defval: '', blankrows: false })
-    const title = String(rows[0]?.find(Boolean) ?? '')
-    const period = parseCompanyMonth(sheetName, title)
-    const headerA = rows[1] ?? []
-    const headerB = rows[3] ?? []
-    const labels = Array.from({ length: Math.max(headerA.length, headerB.length) }, (_, index) => String(headerB[index] || headerA[index] || '').trim())
-    const idx = (keyword: string) => findHeaderIndex(labels, keyword)
-    const indexes = {
-      sequenceNo: idx('序号'),
-      position: idx('岗位'),
-      employeeName: idx('姓名'),
-      attendanceDays: idx('出勤天数'),
-      basicSalary: idx('基本工资'),
-      performanceSalary: idx('绩效工资'),
-      grossSalary: idx('应发工资'),
-      attendanceSalary: idx('出勤工资'),
-      senioritySalary: idx('工龄工资'),
-      overtimeAllowance: idx('加班补助'),
-      travelAllowance: idx('出差补助'),
-      retroactiveSalary: idx('补发工资'),
-      totalAmount: idx('合计金额'),
-      companyPension: idx('养老16%'),
-      companyMedical: idx('医疗6.9%'),
-      companyInjury: idx('工伤0.575%'),
-      companyUnemployment: idx('失业0.5%'),
-      personalPension: labels.findIndex((label, index) => label.includes('养老8%') && index > idx('合计金额')),
-      personalMedical: idx('医疗0.2%'),
-      personalInjury: labels.findIndex((label, index) => label === '工伤' && index > idx('合计金额')),
-      personalUnemployment: labels.findIndex((label, index) => label.includes('失业0.5%') && index > idx('合计金额')),
-      tax: idx('代扣个税'),
-      netSalary: idx('实发工资'),
-      remark: idx('备注'),
-    }
-    const baseText = `${period.companyName || sheetName}${period.financialYear || ''}年${period.financialMonth || ''}月`
-    rows.slice(4).forEach((row, rowIndex) => {
-      const firstCell = String(row[0] ?? '').trim()
-      const employeeName = String(row[indexes.employeeName] ?? '').trim()
-      if (!employeeName || firstCell.includes('合计') || firstCell.includes('批准') || firstCell.includes('制表'))
-        return
-      const record: OaRecord = {
-        id: `salary-${sheetName}-${rowIndex}-${Date.now()}`,
-        code: `SAL${period.financialYear}${String(period.financialMonth).padStart(2, '0')}${String(records.length + 1).padStart(4, '0')}`,
-        companyName: period.companyName,
-        financialYear: period.financialYear,
-        financialMonth: period.financialMonth,
-        sequenceNo: row[indexes.sequenceNo],
-        position: String(row[indexes.position] ?? ''),
-        employeeName,
-        attendanceDays: toSalaryNumber(row[indexes.attendanceDays]),
-        basicSalary: toSalaryNumber(row[indexes.basicSalary]),
-        performanceSalary: toSalaryNumber(row[indexes.performanceSalary]),
-        grossSalary: toSalaryNumber(row[indexes.grossSalary]),
-        attendanceSalary: toSalaryNumber(row[indexes.attendanceSalary]),
-        senioritySalary: toSalaryNumber(row[indexes.senioritySalary]),
-        overtimeAllowance: indexes.overtimeAllowance >= 0 ? toSalaryNumber(row[indexes.overtimeAllowance]) : 0,
-        travelAllowance: toSalaryNumber(row[indexes.travelAllowance]),
-        retroactiveSalary: indexes.retroactiveSalary >= 0 ? toSalaryNumber(row[indexes.retroactiveSalary]) : 0,
-        totalAmount: toSalaryNumber(row[indexes.totalAmount]),
-        socialSecurityBase: Number(String(headerA.find((cell: any) => String(cell).includes('基数')) ?? '').match(/\\d+(?:\\.\\d+)?/)?.[0] ?? 0),
-        companyPension: toSalaryNumber(row[indexes.companyPension]),
-        companyMedical: toSalaryNumber(row[indexes.companyMedical]),
-        companyInjury: toSalaryNumber(row[indexes.companyInjury]),
-        companyUnemployment: toSalaryNumber(row[indexes.companyUnemployment]),
-        personalPension: toSalaryNumber(row[indexes.personalPension]),
-        personalMedical: toSalaryNumber(row[indexes.personalMedical]),
-        personalInjury: toSalaryNumber(row[indexes.personalInjury]),
-        personalUnemployment: toSalaryNumber(row[indexes.personalUnemployment]),
-        tax: toSalaryNumber(row[indexes.tax]),
-        netSalary: toSalaryNumber(row[indexes.netSalary]),
-        cashPayment: String(row[indexes.remark] ?? '').includes('现金') ? '是' : '',
-        remark: String(row[indexes.remark] ?? ''),
-        payStatus: '未发放',
-        status: '草稿',
-        date: `${period.financialYear}-${String(period.financialMonth).padStart(2, '0')}-01`,
-        createdBy: currentUser.value?.id ?? 1,
-        approverId: 1,
-      }
-      recalculateSalary(record)
-      if (!record.companyName || !record.financialYear || !record.financialMonth || !record.employeeName || !record.basicSalary || !record.netSalary) {
-        errors.push(`${baseText} 第 ${rowIndex + 5} 行缺少必填字段`)
-        return
-      }
-      records.push(record)
-    })
-  })
-  return { records, errors }
-}
-
-async function applySalaryImportRecords(records: OaRecord[], errors: string[], input: HTMLInputElement, shouldCover: boolean) {
-  let success = 0
-  let skipped = 0
-  records.forEach((record) => {
-    const index = moduleProfiles.salary.rows.findIndex(row =>
-      row.companyName === record.companyName
-      && row.financialYear === record.financialYear
-      && row.financialMonth === record.financialMonth
-      && row.employeeName === record.employeeName,
-    )
-    if (index > -1) {
-      if (!shouldCover) {
-        skipped += 1
-        return
-      }
-      moduleProfiles.salary.rows[index] = { ...record, id: moduleProfiles.salary.rows[index].id }
-    }
-    else {
-      moduleProfiles.salary.rows.unshift(record)
-    }
-    success += 1
-  })
-  input.value = ''
-  const errorText = errors.length ? `，失败 ${errors.length} 条：${errors.slice(0, 3).join('；')}` : ''
-  await persistOaModuleState(`导入完成，成功 ${success} 条，跳过 ${skipped} 条${errorText}`)
-}
-
-function handleSalaryImportFile(event: Event) {
-  const input = event.target as HTMLInputElement
-  const file = input.files?.[0]
-  if (!file)
-    return
-  const reader = new FileReader()
-  reader.onload = () => {
-    const workbook = XLSX.read(reader.result, { type: 'array', cellDates: true })
-    const { records, errors } = parseSalaryWorkbook(workbook)
-    const duplicateKeys = records.filter(record => moduleProfiles.salary.rows.some(row =>
-      row.companyName === record.companyName
-      && row.financialYear === record.financialYear
-      && row.financialMonth === record.financialMonth
-      && row.employeeName === record.employeeName,
-    ))
-    if (!duplicateKeys.length) {
-      void applySalaryImportRecords(records, errors, input, false)
-      return
-    }
-    Modal.confirm({
-      title: '覆盖重复工资记录',
-      content: `发现 ${duplicateKeys.length} 条同公司、同年月、同员工重复工资，确定覆盖？取消则跳过重复记录。`,
-      okText: '覆盖',
-      cancelText: '跳过',
-      onOk: () => applySalaryImportRecords(records, errors, input, true),
-      onCancel: () => {
-        void applySalaryImportRecords(records, errors, input, false)
-      },
-    })
-  }
-  reader.readAsArrayBuffer(file)
-}
-
 function exportRows() {
+  if (activeKey.value === 'salary' && salaryActiveTab.value === 'records') {
+    exportMonthlyPayroll()
+    return
+  }
   const workbook = XLSX.utils.book_new()
-  const exportColumns = activeKey.value === 'salary' && salaryActiveTab.value === 'templates'
-    ? salaryTemplateColumns.value.filter(column => column.dataIndex !== 'action')
+  const flattenColumns = (columns: Array<Record<string, any>>): Array<Record<string, any>> => columns.flatMap(column => Array.isArray(column.children) ? flattenColumns(column.children) : [column])
+  const exportColumns = activeKey.value === 'salary'
+    ? flattenColumns(tableColumns.value).filter(column => column.dataIndex !== 'action')
     : activeProfile.value.columns
   const exportSource = activeKey.value === 'salary' ? salaryVisibleRows.value : filteredRows.value
   const conditionRows = [{
     页面: activeProfile.value.title,
-    页签: activeKey.value === 'salary' ? (salaryActiveTab.value === 'templates' ? '人员工资模板' : '工资明细') : '',
+    页签: activeKey.value === 'salary' ? (salaryActiveTab.value === 'templates' ? '工资模板' : '工资表') : '',
     财务年: financialPeriodFilter.financialYear || '',
     财务月: financialPeriodFilter.financialMonth || '',
     起始日期: financialPeriodFilter.dateRange?.[0]?.format('YYYY-MM-DD') || '',
@@ -2506,7 +2539,7 @@ function exportRows() {
   }, {}))
   if (activeKey.value === 'salary' && salaryActiveTab.value === 'records') {
     const totalRow: Record<string, any> = { 姓名: '合计金额' }
-    activeProfile.value.columns.forEach((column) => {
+    exportColumns.forEach((column) => {
       if (moneyFields.has(column.dataIndex))
         totalRow[column.title] = plainMoney(sum(salaryVisibleRows.value, column.dataIndex))
     })
@@ -2514,19 +2547,105 @@ function exportRows() {
   }
   XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(conditionRows), '筛选条件')
   XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(exportData), '导出数据')
-  XLSX.writeFile(workbook, `${activeProfile.value.title}_${dayjs().format('YYYYMMDDHHmmss')}.xlsx`)
+  const outputName = activeKey.value === 'salary'
+    ? salaryActiveTab.value === 'templates' ? '工资模板' : '工资表'
+    : activeProfile.value.title
+  XLSX.writeFile(workbook, `${outputName}_${dayjs().format('YYYYMMDDHHmmss')}.xlsx`)
 }
 
-watch(
-  [orgEmployees, currentSalaryPeriod],
-  () => {
-    syncSalaryRowsFromOrg()
-  },
-  { immediate: true, deep: true },
-)
+function payrollCompanyShortName(companyName: string) {
+  return companyName.replace(/^青海/, '').replace(/(运输|能源|新能源)?有限公司$/, '') || companyName
+}
 
-onMounted(() => {
-  void loadOaModuleState()
+function payrollSheetName(companyName: string, month: number) {
+  return `${month}月${payrollCompanyShortName(companyName)}`.replace(/[\\/?*[\]:]/g, '').slice(0, 31)
+}
+
+function exportMonthlyPayroll() {
+  const { financialYear, financialMonth } = currentSalaryPeriod.value
+  const rows = salaryVisibleRows.value.filter(row => row.financialYear === financialYear && row.financialMonth === financialMonth)
+  if (!rows.length) {
+    message.warning('当前财务年月没有可导出的工资记录')
+    return
+  }
+
+  const workbook = XLSX.utils.book_new()
+  const companyGroups = new Map<string, OaRecord[]>()
+  rows.forEach((row) => {
+    const companyName = String(row.companyName || '未归属公司')
+    companyGroups.set(companyName, [...(companyGroups.get(companyName) || []), row])
+  })
+
+  companyGroups.forEach((companyRows, companyName) => {
+    const orderedRows = [...companyRows].sort((a, b) => Number(a.sequenceNo || 0) - Number(b.sequenceNo || 0))
+    const dataStartRow = 5
+    const dataEndRow = dataStartRow + orderedRows.length - 1
+    const totalRow = dataEndRow + 1
+    const sheetRows: any[][] = [
+      [`${companyName}${financialYear}年${financialMonth}月工资表`],
+      ['序号', '岗位', '姓名', '出勤天数', '基本工资', '绩效工资', '应发工资', '', '', '', '', `社保公司缴纳部分/基数`, '', '', '', `社保个人缴纳部分/基数`, '', '', '', '代扣个税', '实发工资', '备注'],
+      ['', '', '', '', '', '', '', '', '', '', '', orderedRows.reduce((total, row) => total + Number(row.companySocialSecurityTotal || 0), 0), '', '', '', orderedRows.reduce((total, row) => total + Number(row.personalSocialSecurityTotal || 0), 0)],
+      ['', '', '', '', '', '', '出勤工资', '工龄工资', '加班补助', '出差/其他补助', '合计金额', '养老16%', '医疗6.9%', '工伤0.575%', '失业0.5%', '养老8%', '医疗0.2%', '工伤', '失业0.5%', '', '', ''],
+      ...orderedRows.map((row, index) => [
+        index + 1,
+        row.position || '',
+        row.employeeName || '',
+        Number(row.actualAttendanceDays ?? row.attendanceDays ?? 0),
+        Number(row.basicSalary || 0),
+        Number(row.performanceSalary || 0),
+        Number(row.attendanceSalary || 0),
+        Number(row.senioritySalary || 0),
+        Number(row.overtimePay || row.overtimeAllowance || 0),
+        Number(row.subsidy || row.travelAllowance || row.bonus || row.retroactiveSalary || 0),
+        Number(row.grossSalary || row.totalAmount || 0),
+        Number(row.companyPension || 0),
+        Number(row.companyMedical || 0),
+        Number(row.companyInjury || 0),
+        Number(row.companyUnemployment || 0),
+        Number(row.personalPension || 0),
+        Number(row.personalMedical || 0),
+        Number(row.personalInjury || 0),
+        Number(row.personalUnemployment || 0),
+        Number(row.tax || 0),
+        Number(row.netSalary || 0),
+        row.remark || (row.cashPayment ? '现金发放' : ''),
+      ]),
+      ['合计金额'],
+      [],
+      ['批准：', '', '', '', '', '', '审核：', '', '', '', '', '', '', '', '', '复核：', '', '', '', '', '制表：'],
+    ]
+    const worksheet = XLSX.utils.aoa_to_sheet(sheetRows)
+    for (const column of ['G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U'])
+      worksheet[`${column}${totalRow}`] = { t: 'n', f: `SUM(${column}${dataStartRow}:${column}${dataEndRow})`, z: '#,##0.00' }
+    worksheet['!merges'] = [
+      { s: { r: 0, c: 0 }, e: { r: 0, c: 21 } },
+      { s: { r: 1, c: 6 }, e: { r: 1, c: 10 } },
+      { s: { r: 1, c: 11 }, e: { r: 1, c: 14 } },
+      { s: { r: 1, c: 15 }, e: { r: 1, c: 18 } },
+      ...[0, 1, 2, 3, 4, 5, 19, 20, 21].map(c => ({ s: { r: 1, c }, e: { r: 3, c } })),
+      { s: { r: totalRow - 1, c: 0 }, e: { r: totalRow - 1, c: 5 } },
+    ]
+    worksheet['!cols'] = [8, 14, 12, 11, 12, 12, 12, 11, 11, 14, 13, 11, 11, 12, 11, 11, 11, 9, 11, 11, 13, 24].map(wch => ({ wch }))
+    worksheet['!rows'] = [{ hpt: 26 }, { hpt: 24 }, { hpt: 20 }, { hpt: 24 }]
+    worksheet['!freeze'] = { xSplit: 3, ySplit: 4, topLeftCell: 'D5', activePane: 'bottomRight', state: 'frozen' }
+    worksheet['!autofilter'] = { ref: `A4:V${dataEndRow}` }
+    worksheet['!pageSetup'] = { orientation: 'landscape', fitToWidth: 1, fitToHeight: 0, paperSize: 9 }
+    worksheet['!margins'] = { left: 0.25, right: 0.25, top: 0.5, bottom: 0.5, header: 0.2, footer: 0.2 }
+    XLSX.utils.book_append_sheet(workbook, worksheet, payrollSheetName(companyName, financialMonth))
+  })
+  XLSX.writeFile(workbook, `工资表_${financialYear}年${financialMonth}月.xlsx`)
+}
+
+watch(currentSalaryPeriod, () => {
+  if (salaryAutoGenerationReady)
+    void ensureSalaryPeriodGenerated()
+})
+
+onMounted(async () => {
+  await businessDictionaries.load()
+  await loadOaModuleState()
+  salaryAutoGenerationReady = true
+  await ensureSalaryPeriodGenerated()
 })
 </script>
 
@@ -2558,10 +2677,68 @@ onMounted(() => {
       @reconcile="reconcileFinanceRecords"
     />
 
-    <SummaryCards v-if="activeKey !== 'dashboard'" :cards="summaryCards" :loading="loading || saving" :xl-span="4" :single-column="activeKey === 'salary'" compact />
+    <SummaryCards v-if="activeKey !== 'dashboard' && activeKey !== 'salary'" :cards="summaryCards" :loading="loading || saving" :data-state="filteredRows.length ? 'ready' : 'empty'" :xl-span="4" compact />
+    <FinanceAgingInsights v-if="activeKey === 'receivable'" :rows="filteredRows" />
 
     <a-card v-if="activeKey !== 'org'" :bordered="false" mb-4>
-      <a-row :gutter="[16, 16]" align="middle">
+      <section v-if="activeKey === 'salary'" class="salary-period-workspace">
+        <div class="salary-period-head">
+          <div>
+            <div class="salary-period-title-row">
+              <h2>工资管理</h2>
+              <span v-if="salaryActiveTab === 'records'" class="salary-period-date">{{ currentSalaryPeriod.financialYear }}年{{ currentSalaryPeriod.financialMonth }}月</span>
+              <a-tag v-if="salaryActiveTab === 'records' && salaryAutoGenerating" color="processing">
+                自动生成中
+              </a-tag>
+              <a-tag v-else-if="salaryActiveTab === 'records'" :color="statusColor(salaryPeriodOverview.status)">
+                {{ salaryPeriodOverview.status }}
+              </a-tag>
+            </div>
+            <p>{{ salaryActiveTab === 'templates' ? '维护人员固定工资标准，新月份自动沿用。' : '在职人员工资表按月自动生成；录入本月三项变动后即时核算。' }}</p>
+          </div>
+          <a-space v-if="salaryActiveTab === 'templates'" wrap>
+            <a-button v-if="salaryActiveTab === 'templates'" @click="router.push('/system/users')">
+              新增人员
+            </a-button>
+          </a-space>
+        </div>
+
+        <a-alert v-if="salaryAutoGenerationError" class="salary-generation-alert" type="error" show-icon :message="salaryAutoGenerationError">
+          <template #action>
+            <a-button size="small" @click="ensureSalaryPeriodGenerated">
+              重试
+            </a-button>
+          </template>
+        </a-alert>
+
+        <div class="salary-action-bar">
+          <div v-if="salaryActiveTab === 'records'" class="salary-period-summary" aria-label="本月工资摘要">
+            <span>在职 <strong>{{ salaryPeriodOverview.employeeCount }}</strong> 人</span>
+            <span>已生成 <strong>{{ salaryPeriodOverview.generatedCount }}</strong> 人</span>
+            <span v-if="salaryPeriodOverview.missingCount" class="is-warning">缺少 <strong>{{ salaryPeriodOverview.missingCount }}</strong> 人</span>
+            <span v-if="salaryPeriodOverview.pendingEntryCount" class="is-warning">待补录 <strong>{{ salaryPeriodOverview.pendingEntryCount }}</strong> 人</span>
+            <span>实发合计 <strong>{{ money(sum(currentSalaryRows, 'netSalary')) }}</strong></span>
+          </div>
+          <div v-else class="salary-period-summary" aria-label="工资模板摘要">
+            <span>在职人员 <strong>{{ salaryPeriodOverview.employeeCount }}</strong> 人</span>
+            <span>已设模板 <strong>{{ salaryTemplateRows.filter(row => row.templateStatus !== '未设置').length }}</strong> 人</span>
+            <span v-if="salaryTemplateRows.some(row => row.templateStatus === '未设置')" class="is-warning">待设置 <strong>{{ salaryTemplateRows.filter(row => row.templateStatus === '未设置').length }}</strong> 人</span>
+          </div>
+          <a-space wrap>
+            <a-button v-if="salaryActiveTab === 'records'" type="primary" :loading="saving" :disabled="salaryAutoGenerating" @click="saveSalaryDirectEntry">
+              保存本月录入
+            </a-button>
+            <a-button v-if="salaryActiveTab === 'records'" :disabled="salaryAutoGenerating || saving" @click="lockVisibleSalaries">
+              锁定本月
+            </a-button>
+            <a-button v-if="salaryActiveTab === 'records'" @click="exportRows">
+              导出
+            </a-button>
+          </a-space>
+        </div>
+      </section>
+
+      <a-row v-else :gutter="[16, 16]" align="middle">
         <a-col :xs="24" :lg="12">
           <div text-20px font-600>
             {{ activeProfile.title }}
@@ -2572,36 +2749,35 @@ onMounted(() => {
         </a-col>
         <a-col :xs="24" :lg="12">
           <a-space wrap style="justify-content: flex-end; width: 100%;">
-            <a-button v-if="activeKey === 'salary'" @click="salaryImportInput?.click()">
-              导入工资表
-            </a-button>
-            <input ref="salaryImportInput" type="file" accept=".xls,.xlsx" style="display: none;" @change="handleSalaryImportFile">
             <a-button @click="exportRows">
               导出表格
             </a-button>
             <a-button v-if="activeKey === 'cash'" type="primary" @click="openReceiptModal">
               登记来款
             </a-button>
-            <a-button v-if="activeKey === 'salary' && salaryActiveTab === 'records'" type="primary" @click="openCreateSalary">
-              新增工资
-            </a-button>
           </a-space>
         </a-col>
       </a-row>
-
-      <a-form mt-4 class="oa-query" :label-col="{ span: 7 }">
+      <a-form mt-4 class="oa-query" :label-col="{ span: 7 }" @finish="handleQuery">
         <a-row :gutter="[16, 0]">
-          <FinancialPeriodFilter v-model="financialPeriodFilter" :available-month-keys="availableMonthKeys" />
-          <a-col :xs="24" :md="8" :xl="4">
+          <FinancialPeriodFilter
+            v-if="activeKey !== 'salary' || salaryActiveTab === 'records'"
+            v-model="financialPeriodFilter"
+            :available-month-keys="activeKey === 'salary' ? [] : availableMonthKeys"
+            :show-date-range="activeKey !== 'salary'"
+            :year-col="activeKey === 'salary' ? { xs: 24, md: 8, xl: 4 } : { xs: 24, md: 8, xl: 6 }"
+            :month-col="activeKey === 'salary' ? { xs: 24, md: 8, xl: 4 } : { xs: 24, md: 8, xl: 6 }"
+          />
+          <a-col v-if="activeKey !== 'salary'" :xs="24" :md="8" :xl="4">
             <a-form-item label="状态">
               <a-select v-model:value="queryModel.status" allow-clear placeholder="请选择状态">
-                <a-select-option v-for="item in statusOptions" :key="item" :value="item">
+                <a-select-option v-for="item in statusOptions.filter(item => !(activeKey === 'salary' && item === '已作废'))" :key="item" :value="item">
                   {{ item }}
                 </a-select-option>
               </a-select>
             </a-form-item>
           </a-col>
-          <a-col :xs="24" :md="8" :xl="6">
+          <a-col :xs="24" :md="8" :xl="activeKey === 'salary' ? 5 : 6">
             <a-form-item label="关键字">
               <a-input v-model:value="queryModel.keyword" :placeholder="activeProfile.keywordPlaceholder" allow-clear />
             </a-form-item>
@@ -2610,14 +2786,8 @@ onMounted(() => {
             <a-col :xs="24" :md="8" :xl="5">
               <a-form-item label="公司名称">
                 <a-select v-model:value="queryModel.companyName" allow-clear placeholder="请选择公司">
-                  <a-select-option value="青海诚捷运输有限公司">
-                    青海诚捷运输有限公司
-                  </a-select-option>
-                  <a-select-option value="青海诚域能源有限公司">
-                    青海诚域能源有限公司
-                  </a-select-option>
-                  <a-select-option value="青海诺锐新能源有限公司">
-                    青海诺锐新能源有限公司
+                  <a-select-option v-for="item in companyNameOptions" :key="item" :value="item">
+                    {{ item }}
                   </a-select-option>
                 </a-select>
               </a-form-item>
@@ -2627,7 +2797,7 @@ onMounted(() => {
                 <a-input v-model:value="queryModel.orgPosition" allow-clear placeholder="输入岗位" />
               </a-form-item>
             </a-col>
-            <a-col :xs="24" :md="8" :xl="4">
+            <a-col v-if="salaryActiveTab === 'records'" :xs="24" :md="8" :xl="3">
               <a-form-item label="发放状态">
                 <a-select v-model:value="queryModel.payStatus" allow-clear placeholder="请选择">
                   <a-select-option value="未发放">
@@ -2643,7 +2813,7 @@ onMounted(() => {
           <a-col :xs="24" :md="8" :xl="4">
             <a-form-item>
               <a-space>
-                <a-button type="primary" @click="handleQuery">
+                <a-button type="primary" html-type="submit">
                   查询
                 </a-button>
                 <a-button @click="resetQuery">
@@ -2654,10 +2824,16 @@ onMounted(() => {
           </a-col>
         </a-row>
       </a-form>
-      <a-tabs v-if="activeKey === 'salary'" v-model:active-key="salaryActiveTab" class="salary-inner-tabs">
-        <a-tab-pane key="records" tab="工资明细" />
-        <a-tab-pane key="templates" tab="人员工资模板" />
-      </a-tabs>
+      <SalaryWorkspaceControls
+        v-if="activeKey === 'salary'"
+        v-model:active-tab="salaryActiveTab"
+        v-model:template-open="salaryTemplateOpen"
+        :template-form="salaryTemplateForm"
+        :template-saving="salaryTemplateSaving"
+        @save-template="saveSalaryTemplate"
+        @recalculate-template="recalculateSalaryTemplate"
+        @update-template-field="(field, value) => salaryTemplateForm[field] = Number(value || 0)"
+      />
     </a-card>
 
     <OrgManagementView
@@ -2676,6 +2852,7 @@ onMounted(() => {
       :pagination="pagination"
       :scroll-x="orgTableScrollX"
       :loading="loading || saving"
+      :read-only="true"
       :status-color="statusColor"
       :column-key="columnKey"
       @query="handleQuery"
@@ -2710,7 +2887,6 @@ onMounted(() => {
 
     <CashBalanceView
       v-if="activeKey === 'cash'"
-      :cards="cashBalanceCards"
       :current-groups="currentCashBalanceGroups"
       :total="cashBalanceTotal"
       :query="cashBalanceQuery"
@@ -2722,6 +2898,7 @@ onMounted(() => {
       :money="money"
       @batch="openBatchBalanceModal"
       @create="openCashBalanceModal()"
+      @history="record => openCashBalanceHistory(asCashBalanceRecord(record))"
       @edit="record => openCashBalanceModal(asCashBalanceRecord(record))"
       @delete="record => deleteCashBalance(asCashBalanceRecord(record))"
     />
@@ -2730,13 +2907,14 @@ onMounted(() => {
       v-if="activeKey !== 'org' && activeKey !== 'dashboard'"
       :module-key="activeKey"
       :salary-tab="salaryActiveTab"
-      :title="activeKey === 'salary' && salaryActiveTab === 'templates' ? '人员工资模板' : `${activeProfile.title}列表`"
+      :title="activeKey === 'salary' ? (salaryActiveTab === 'templates' ? '人员工资模板' : `${currentSalaryPeriod.financialYear}年${currentSalaryPeriod.financialMonth}月工资表`) : `${activeProfile.title}列表`"
       :columns="tableColumns"
       :rows="activeKey === 'salary' ? salaryVisibleRows : filteredRows"
       :pagination="activeKey === 'salary' ? false : pagination"
       :scroll="activeTableScroll"
       :loading="loading || saving"
       :salary-editing-id="salaryInlineEditingId"
+      :salary-direct-entry="activeKey === 'salary' && salaryActiveTab === 'records'"
       :wage-fields="salaryWageFields"
       :social-fields="salarySocialExpenseFields"
       :column-key="columnKey"
@@ -2747,12 +2925,11 @@ onMounted(() => {
       :more-actions="moreRowActions"
       @view-employee="record => openOrgEmployeeFromTemplate(asOaRecord(record))"
       @edit-template="record => openSalaryTemplateEdit(asOaRecord(record))"
-      @generate-salary="record => generateSalaryFromTemplate(asOaRecord(record))"
       @recalculate-salary="record => recalculateSalary(asOaRecord(record))"
       @run-action="runRowAction"
     />
 
-    <a-modal v-model:open="orgFormOpen" :title="`${orgFormMode === 'create' ? '新增' : '编辑'}${orgFormType}`" width="760px" :mask-closable="false" ok-text="保存" cancel-text="取消" @ok="saveOrgForm">
+    <a-modal v-model:open="orgFormOpen" :title="`${orgFormMode === 'create' ? '新增' : '编辑'}${orgFormType}`" width="760px" :mask-closable="false" :confirm-loading="saving" :closable="!saving" :keyboard="!saving" :cancel-button-props="{ disabled: saving }" ok-text="保存" cancel-text="取消" @ok="saveOrgForm">
       <a-form layout="vertical">
         <a-row :gutter="16">
           <a-col :xs="24" :md="12">
@@ -2845,42 +3022,42 @@ onMounted(() => {
           </a-col>
           <a-col v-if="orgFormType === '员工'" :xs="24" :md="12">
             <a-form-item label="基本工资">
-              <a-input-number v-model:value="orgForm.basicSalary" class="w-full" :precision="2" :min="0" />
+              <business-input-number v-model:value="orgForm.basicSalary" class="w-full" :precision="2" :min="0" />
             </a-form-item>
           </a-col>
           <a-col v-if="orgFormType === '员工'" :xs="24" :md="12">
             <a-form-item label="绩效工资">
-              <a-input-number v-model:value="orgForm.performanceSalary" class="w-full" :precision="2" :min="0" />
+              <business-input-number v-model:value="orgForm.performanceSalary" class="w-full" :precision="2" :min="0" />
             </a-form-item>
           </a-col>
           <a-col v-if="orgFormType === '员工'" :xs="24" :md="12">
             <a-form-item label="工龄工资">
-              <a-input-number v-model:value="orgForm.senioritySalary" class="w-full" :precision="2" :min="0" />
+              <business-input-number v-model:value="orgForm.senioritySalary" class="w-full" :precision="2" :min="0" />
             </a-form-item>
           </a-col>
           <a-col v-if="orgFormType === '员工'" :xs="24" :md="12">
             <a-form-item label="加班补助">
-              <a-input-number v-model:value="orgForm.overtimeAllowance" class="w-full" :precision="2" :min="0" />
+              <business-input-number v-model:value="orgForm.overtimeAllowance" class="w-full" :precision="2" :min="0" />
             </a-form-item>
           </a-col>
           <a-col v-if="orgFormType === '员工'" :xs="24" :md="12">
             <a-form-item label="出差补助">
-              <a-input-number v-model:value="orgForm.travelAllowance" class="w-full" :precision="2" :min="0" />
+              <business-input-number v-model:value="orgForm.travelAllowance" class="w-full" :precision="2" :min="0" />
             </a-form-item>
           </a-col>
           <a-col v-if="orgFormType === '员工'" :xs="24" :md="12">
             <a-form-item label="补发工资">
-              <a-input-number v-model:value="orgForm.retroactiveSalary" class="w-full" :precision="2" :min="0" />
+              <business-input-number v-model:value="orgForm.retroactiveSalary" class="w-full" :precision="2" :min="0" />
             </a-form-item>
           </a-col>
           <a-col v-if="orgFormType === '员工'" :xs="24" :md="12">
             <a-form-item label="社保基数">
-              <a-input-number v-model:value="orgForm.socialSecurityBase" class="w-full" :precision="2" :min="0" />
+              <business-input-number v-model:value="orgForm.socialSecurityBase" class="w-full" :precision="2" :min="0" />
             </a-form-item>
           </a-col>
           <a-col v-if="orgFormType === '员工'" :xs="24" :md="12">
             <a-form-item label="默认个税">
-              <a-input-number v-model:value="orgForm.tax" class="w-full" :precision="2" :min="0" />
+              <business-input-number v-model:value="orgForm.tax" class="w-full" :precision="2" :min="0" />
             </a-form-item>
           </a-col>
           <a-col :xs="24" :md="12">
@@ -2917,7 +3094,7 @@ onMounted(() => {
           </a-col>
           <a-col v-if="orgFormType === '部门'" :xs="24" :md="12">
             <a-form-item label="排序号">
-              <a-input-number v-model:value="orgForm.sortNo" class="w-full" :min="0" />
+              <business-input-number v-model:value="orgForm.sortNo" class="w-full" :min="0" />
             </a-form-item>
           </a-col>
           <a-col v-if="orgFormType === '岗位'" :span="24">
@@ -2934,7 +3111,7 @@ onMounted(() => {
       </a-form>
     </a-modal>
 
-    <a-modal v-model:open="roleModalOpen" title="分配角色/权限" width="520px" :mask-closable="false" ok-text="保存" cancel-text="取消" @ok="saveRoleAssignment">
+    <a-modal v-model:open="roleModalOpen" title="分配角色/权限" width="520px" :mask-closable="false" :confirm-loading="saving" :closable="!saving" :keyboard="!saving" :cancel-button-props="{ disabled: saving }" ok-text="保存" cancel-text="取消" @ok="saveRoleAssignment">
       <a-form v-if="orgActionRecord" layout="vertical">
         <a-form-item label="角色">
           <a-select v-model:value="orgActionRecord.role" mode="tags" placeholder="请选择角色">
@@ -2962,7 +3139,7 @@ onMounted(() => {
       </a-form>
     </a-modal>
 
-    <a-modal v-model:open="approverModalOpen" title="设置审批关系" width="680px" :mask-closable="false" ok-text="保存" cancel-text="取消" @ok="saveApproverAssignment">
+    <a-modal v-model:open="approverModalOpen" title="设置审批关系" width="680px" :mask-closable="false" :confirm-loading="saving" :closable="!saving" :keyboard="!saving" :cancel-button-props="{ disabled: saving }" ok-text="保存" cancel-text="取消" @ok="saveApproverAssignment">
       <a-form v-if="orgActionRecord" layout="vertical">
         <a-row :gutter="16">
           <a-col :xs="24" :md="12">
@@ -3040,7 +3217,7 @@ onMounted(() => {
       </a-steps>
     </a-modal>
 
-    <a-modal v-model:open="editOpen" :title="`${activeKey === 'salary' && editingRecord?.employeeName ? `编辑工资 - ${editingRecord.employeeName}` : `编辑${activeProfile.title}`}`" width="760px" :mask-closable="false" ok-text="保存" cancel-text="取消" @ok="saveEdit">
+    <a-modal v-model:open="editOpen" :title="`${activeKey === 'salary' && editingRecord?.employeeName ? `编辑工资 - ${editingRecord.employeeName}` : `编辑${activeProfile.title}`}`" width="760px" :mask-closable="false" :confirm-loading="saving" :closable="!saving" :keyboard="!saving" :cancel-button-props="{ disabled: saving }" ok-text="保存" cancel-text="取消" @ok="saveEdit">
       <a-form v-if="editingRecord && activeKey === 'salary'" layout="vertical">
         <a-row :gutter="16">
           <a-col :xs="24" :md="8">
@@ -3060,12 +3237,12 @@ onMounted(() => {
           </a-col>
           <a-col :xs="24" :md="8">
             <a-form-item label="财务年">
-              <a-input-number v-model:value="editingRecord.financialYear" class="w-full" :min="2020" :max="2035" />
+              <business-input-number v-model:value="editingRecord.financialYear" class="w-full" :min="2020" :max="2035" />
             </a-form-item>
           </a-col>
           <a-col :xs="24" :md="8">
             <a-form-item label="财务月">
-              <a-input-number v-model:value="editingRecord.financialMonth" class="w-full" :min="1" :max="12" />
+              <business-input-number v-model:value="editingRecord.financialMonth" class="w-full" :min="1" :max="12" />
             </a-form-item>
           </a-col>
           <a-col :xs="24" :md="8">
@@ -3085,7 +3262,7 @@ onMounted(() => {
           </a-col>
           <a-col :xs="24" :md="8">
             <a-form-item label="出勤天数">
-              <a-input-number v-model:value="editingRecord.attendanceDays" class="w-full" :min="0" :max="31" @change="recalculateSalary(editingRecord)" />
+              <business-input-number v-model:value="editingRecord.attendanceDays" class="w-full" :min="0" :max="31" @change="recalculateSalary(editingRecord)" />
             </a-form-item>
           </a-col>
           <a-col
@@ -3101,7 +3278,7 @@ onMounted(() => {
             ]" :key="field[1]" :xs="24" :md="8"
           >
             <a-form-item :label="field[0]">
-              <a-input-number
+              <business-input-number
                 v-model:value="editingRecord[field[1]]"
                 class="w-full"
                 :precision="2"
@@ -3227,7 +3404,7 @@ onMounted(() => {
         <a-row :gutter="16">
           <a-col v-for="column in activeProfile.columns.filter(item => !['grossSalary', 'netSalary', 'timeRange', 'vehicleInfo'].includes(item.dataIndex))" :key="column.dataIndex" :xs="24" :md="12">
             <a-form-item :label="column.title">
-              <a-input-number
+              <business-input-number
                 v-if="moneyFields.has(column.dataIndex) || ['passengers', 'mileage'].includes(column.dataIndex)"
                 v-model:value="editingRecord[column.dataIndex]"
                 :precision="moneyFields.has(column.dataIndex) ? 2 : 0"
@@ -3245,8 +3422,8 @@ onMounted(() => {
       </a-form>
     </a-modal>
 
-    <a-modal v-model:open="paymentOpen" title="创建付款指令" width="860px" :mask-closable="false" ok-text="创建指令" cancel-text="取消" :confirm-loading="saving" @ok="savePaymentInstruction">
-      <a-alert mb-4 type="warning" show-icon message="创建指令不会立即扣款；银行支付完成后需在现金管理中确认支付。" />
+    <a-modal v-model:open="paymentOpen" title="确认付款" width="860px" :mask-closable="false" :closable="!saving" :keyboard="!saving" :cancel-button-props="{ disabled: saving }" ok-text="确认付款" cancel-text="取消" :confirm-loading="saving" @ok="confirmPaymentInstruction">
+      <a-alert mb-4 type="warning" show-icon message="请完整选择付款主体和账号；创建指令不会立即扣款，确认支付成功后将从该账号现金余额中扣除付款金额。" />
       <a-form layout="vertical">
         <a-row :gutter="16">
           <a-col :xs="24" :md="12">
@@ -3255,13 +3432,26 @@ onMounted(() => {
             </a-form-item>
           </a-col>
           <a-col :xs="24" :md="12">
-            <a-form-item label="付款账户" required>
-              <a-input v-model:value="paymentForm.accountName" placeholder="如：工行基本户" />
+            <a-form-item label="主体名称" required>
+              <a-select v-model:value="paymentForm.companyName" show-search placeholder="请选择付款主体" @change="selectPaymentCompany">
+                <a-select-option v-for="company in paymentCompanyOptions" :key="company" :value="company">
+                  {{ company }}
+                </a-select-option>
+              </a-select>
+            </a-form-item>
+          </a-col>
+          <a-col :xs="24" :md="12">
+            <a-form-item label="付款账号" required>
+              <a-select v-model:value="paymentForm.cashBalanceId" show-search option-filter-prop="label" :disabled="!paymentForm.companyName" placeholder="请选择现金余额账号" @change="selectPaymentAccount">
+                <a-select-option v-for="account in paymentAccountOptions" :key="account.id" :value="account.id" :label="`${account.bank_name} ${account.account_no_tail}`">
+                  {{ account.bank_name }} · {{ account.account_no_tail }} · 余额 {{ money(account.balance_amount) }}
+                </a-select-option>
+              </a-select>
             </a-form-item>
           </a-col>
           <a-col :xs="24" :md="12">
             <a-form-item label="计划付款日期" required>
-              <a-input v-model:value="paymentForm.paymentDate" placeholder="YYYY-MM-DD" />
+              <a-date-picker v-model:value="paymentForm.paymentDate" value-format="YYYY-MM-DD" format="YYYY-MM-DD" :allow-clear="false" style="width: 100%;" />
             </a-form-item>
           </a-col>
           <a-col :xs="24" :md="12">
@@ -3307,7 +3497,7 @@ onMounted(() => {
             </a-select>
           </a-col>
           <a-col :xs="18" :md="7">
-            <a-input-number v-model:value="row.amount" :precision="2" :min="0.01" placeholder="付款金额" style="width: 100%;" />
+            <business-input-number v-model:value="row.amount" :precision="2" :min="0.01" placeholder="付款金额" style="width: 100%;" />
           </a-col>
           <a-col :xs="6" :md="3">
             <a-button type="link" danger :disabled="paymentAllocationRows.length === 1" @click="paymentAllocationRows.splice(index, 1)">
@@ -3326,7 +3516,7 @@ onMounted(() => {
       </div>
     </a-modal>
 
-    <a-modal v-model:open="paymentConfirmOpen" title="确认银行支付" width="620px" :mask-closable="false" ok-text="确认已支付" cancel-text="取消" :confirm-loading="saving" @ok="savePaymentConfirm">
+    <a-modal v-model:open="paymentConfirmOpen" title="确认银行支付" width="620px" :mask-closable="false" :closable="!saving" :keyboard="!saving" :cancel-button-props="{ disabled: saving }" ok-text="确认已支付" cancel-text="取消" :confirm-loading="saving" @ok="savePaymentConfirm">
       <a-alert mb-4 type="warning" show-icon message="确认后将生成现金支出并核销应付，请根据银行回单操作。" />
       <a-descriptions v-if="activePayment" size="small" :column="2" bordered mb-4>
         <a-descriptions-item label="付款请求号">
@@ -3336,7 +3526,7 @@ onMounted(() => {
           {{ money(activePayment.paymentAmount) }}
         </a-descriptions-item>
         <a-descriptions-item label="付款账户">
-          {{ activePayment.accountName }}
+          {{ activePayment.companyName }} · {{ activePayment.accountNo || activePayment.accountName }}
         </a-descriptions-item>
         <a-descriptions-item label="收款方">
           {{ activePayment.payeeName }}
@@ -3347,12 +3537,12 @@ onMounted(() => {
           <a-input v-model:value="paymentConfirmForm.bankSerialNo" placeholder="填写银行回单流水号" />
         </a-form-item>
         <a-form-item label="支付时间">
-          <a-input v-model:value="paymentConfirmForm.paidAt" placeholder="YYYY-MM-DD HH:mm:ss" />
+          <a-date-picker v-model:value="paymentConfirmForm.paidAt" show-time value-format="YYYY-MM-DD HH:mm:ss" format="YYYY-MM-DD HH:mm:ss" style="width: 100%;" />
         </a-form-item>
       </a-form>
     </a-modal>
 
-    <a-modal v-model:open="paymentFailOpen" title="记录支付失败" width="560px" :mask-closable="false" ok-text="确认失败" cancel-text="取消" :confirm-loading="saving" @ok="savePaymentFailure">
+    <a-modal v-model:open="paymentFailOpen" title="记录支付失败" width="560px" :mask-closable="false" :closable="!saving" :keyboard="!saving" :cancel-button-props="{ disabled: saving }" ok-text="确认失败" cancel-text="取消" :confirm-loading="saving" @ok="savePaymentFailure">
       <a-alert mb-4 type="info" show-icon message="标记失败不会产生现金支出，也不会增加应付单已付金额。" />
       <a-form layout="vertical">
         <a-form-item label="失败原因" required>
@@ -3361,13 +3551,32 @@ onMounted(() => {
       </a-form>
     </a-modal>
 
-    <a-modal v-model:open="receiptOpen" title="登记来款" width="720px" :mask-closable="false" ok-text="确认登记" cancel-text="取消" :confirm-loading="saving" @ok="saveReceipt">
-      <a-alert mb-4 type="info" show-icon message="登记后形成真实收入流水；关联应收请在流水列表执行核销。" />
+    <a-modal v-model:open="receiptOpen" title="登记来款" width="720px" :mask-closable="false" :closable="!saving" :keyboard="!saving" :cancel-button-props="{ disabled: saving }" ok-text="确认登记" cancel-text="取消" :confirm-loading="saving" @ok="saveReceipt">
+      <a-alert mb-4 type="info" show-icon message="登记后将整笔到账金额计入所选银行账号；关联应收请在流水列表执行核销。" />
       <a-form layout="vertical">
         <a-row :gutter="16">
           <a-col :xs="24" :md="12">
             <a-form-item label="收款账户" required>
-              <a-input v-model:value="receiptForm.accountName" placeholder="如：工行基本户" />
+              <a-select
+                v-model:value="receiptForm.cashBalanceId"
+                show-search
+                option-filter-prop="label"
+                option-label-prop="label"
+                placeholder="请选择现金余额管理中的账号"
+                @change="handleReceiptCashAccountChange"
+              >
+                <a-select-option
+                  v-for="account in receiptCashAccounts"
+                  :key="account.id"
+                  :value="account.id"
+                  :label="cashBalanceCompactLabel(account)"
+                >
+                  {{ cashBalanceOptionLabel(account) }} · 当前余额 {{ money(account.balance_amount) }}
+                </a-select-option>
+              </a-select>
+              <small v-if="selectedReceiptCashAccount" class="form-field-hint">
+                登记后余额 {{ money(receiptAccountBalanceAfterRegistration) }}
+              </small>
             </a-form-item>
           </a-col>
           <a-col :xs="24" :md="12">
@@ -3384,12 +3593,12 @@ onMounted(() => {
           </a-col>
           <a-col :xs="24" :md="12">
             <a-form-item label="到账日期" required>
-              <a-input v-model:value="receiptForm.receiptDate" placeholder="YYYY-MM-DD" />
+              <a-date-picker v-model:value="receiptForm.receiptDate" value-format="YYYY-MM-DD" format="YYYY-MM-DD" :allow-clear="false" style="width: 100%;" />
             </a-form-item>
           </a-col>
           <a-col :xs="24" :md="12">
             <a-form-item label="来款金额" required>
-              <a-input-number v-model:value="receiptForm.amount" :precision="2" :min="0.01" style="width: 100%;" />
+              <business-input-number v-model:value="receiptForm.amount" :precision="2" :min="0.01" style="width: 100%;" />
             </a-form-item>
           </a-col>
           <a-col :xs="24" :md="12">
@@ -3432,55 +3641,143 @@ onMounted(() => {
       </a-form>
     </a-modal>
 
-    <a-modal v-model:open="receiptAllocationOpen" title="核销来款" width="820px" :mask-closable="false" ok-text="确认核销" cancel-text="取消" :confirm-loading="saving" @ok="saveReceiptAllocation">
-      <a-descriptions v-if="allocatingReceipt" size="small" :column="3" bordered mb-4>
-        <a-descriptions-item label="付款方">
-          {{ allocatingReceipt.payerName || '-' }}
-        </a-descriptions-item>
-        <a-descriptions-item label="来款金额">
-          {{ money(allocatingReceipt.incomeAmount) }}
-        </a-descriptions-item>
-        <a-descriptions-item label="未认领">
-          {{ money(allocatingReceipt.unrecognizedAmount) }}
-        </a-descriptions-item>
-      </a-descriptions>
-      <a-space direction="vertical" style="width: 100%;" :size="12">
-        <a-row v-for="(row, index) in receiptAllocationRows" :key="index" :gutter="12" align="middle">
-          <a-col :xs="24" :md="11">
-            <a-select v-model:value="row.receivableId" show-search option-filter-prop="label" placeholder="选择应收单" style="width: 100%;">
-              <a-select-option v-for="item in openReceivableOptions" :key="item.id" :value="item.id" :label="`${item.code} ${item.counterparty}`">
-                {{ item.code }} · {{ item.counterparty }} · 未收 {{ money(item.unpaidAmount) }}
+    <a-modal
+      v-model:open="receiptAllocationOpen"
+      title="核销来款"
+      width="960px"
+      wrap-class-name="receipt-allocation-modal"
+      :mask-closable="false"
+      :keyboard="!saving"
+      :closable="!saving"
+      ok-text="确认核销"
+      cancel-text="取消"
+      :confirm-loading="saving"
+      :cancel-button-props="{ disabled: saving }"
+      @ok="saveReceiptAllocation"
+    >
+      <div v-if="allocatingReceipt" class="receipt-allocation-meta">
+        <div class="receipt-allocation-meta__item">
+          <span>入账账户</span>
+          <strong>
+            <a-select
+              v-model:value="receiptAllocationCashBalanceId"
+              show-search
+              option-filter-prop="label"
+              option-label-prop="label"
+              placeholder="请选择对应银行账号"
+              :disabled="Boolean(allocatingReceipt.balancePostedAt)"
+              class="receipt-allocation-account-select"
+              aria-label="核销对应的收款账户"
+            >
+              <a-select-option
+                v-for="account in receiptCashAccounts"
+                :key="account.id"
+                :value="account.id"
+                :label="cashBalanceCompactLabel(account)"
+              >
+                {{ cashBalanceOptionLabel(account) }} · 余额 {{ money(account.balance_amount) }}
               </a-select-option>
             </a-select>
-          </a-col>
-          <a-col :xs="18" :md="7">
-            <a-input-number v-model:value="row.amount" :precision="2" :min="0.01" placeholder="核销金额" style="width: 100%;" />
-          </a-col>
-          <a-col :xs="6" :md="3">
-            <a-button type="link" danger :disabled="receiptAllocationRows.length === 1" @click="receiptAllocationRows.splice(index, 1)">
+          </strong>
+        </div>
+        <div class="receipt-allocation-meta__item">
+          <span>付款方</span>
+          <strong>{{ allocatingReceipt.payerName || allocatingReceipt.counterpartyName || '-' }}</strong>
+        </div>
+        <div class="receipt-allocation-meta__item">
+          <span>来款金额</span>
+          <strong>{{ money(allocatingReceipt.incomeAmount) }}</strong>
+        </div>
+        <div class="receipt-allocation-meta__item">
+          <span>未认领</span>
+          <strong>{{ money(allocatingReceipt.unrecognizedAmount) }}</strong>
+        </div>
+      </div>
+
+      <a-alert
+        v-if="selectedReceiptAllocationCashAccount"
+        class="receipt-allocation-posting-alert"
+        :type="allocatingReceipt?.balancePostedAt ? 'success' : 'info'"
+        show-icon
+        :message="allocatingReceipt?.balancePostedAt
+          ? `该来款已计入此账号，当前余额 ${money(selectedReceiptAllocationCashAccount.balance_amount)}，本次核销不会重复增加。`
+          : `确认后整笔到账 ${money(allocatingReceipt?.incomeAmount)} 将计入此账号，预计余额 ${money(receiptAllocationAccountBalanceAfterPosting)}。`"
+      />
+
+      <div class="receipt-allocation-workspace">
+        <div class="receipt-allocation-list" role="group" aria-label="应收单核销明细">
+          <div v-for="(row, index) in receiptAllocationRows" :key="index" class="receipt-allocation-row">
+            <div class="receipt-allocation-field">
+              <span class="receipt-allocation-field__label">核销应收单</span>
+              <a-select
+                v-model:value="row.receivableId"
+                show-search
+                option-filter-prop="label"
+                placeholder="请选择应收单"
+                aria-label="核销应收单"
+                class="receipt-allocation-receivable"
+              >
+                <a-select-option
+                  v-for="item in openReceivableOptions"
+                  :key="item.id"
+                  :value="item.id"
+                  :label="`${item.code} · ${item.counterparty} · 未收 ${money(item.unpaidAmount)}`"
+                >
+                  {{ item.code }} · {{ item.counterparty }} · 未收 {{ money(item.unpaidAmount) }}
+                </a-select-option>
+              </a-select>
+              <small v-if="receiptAllocationReceivable(row.receivableId)" class="receipt-allocation-field__hint">
+                往来单位：{{ receiptAllocationReceivable(row.receivableId)?.counterparty }}
+              </small>
+            </div>
+            <div class="receipt-allocation-field">
+              <span class="receipt-allocation-field__label">核销金额（元）</span>
+              <business-input-number
+                v-model:value="row.amount"
+                :precision="2"
+                :min="0.01"
+                :max="row.receivableId ? receiptAllocationLimit(row.receivableId) : undefined"
+                placeholder="请输入核销金额"
+                aria-label="核销金额"
+                class="receipt-allocation-amount"
+              />
+              <small v-if="receiptAllocationReceivable(row.receivableId)" class="receipt-allocation-field__hint">
+                本单最多核销 {{ money(receiptAllocationLimit(row.receivableId)) }}
+              </small>
+            </div>
+            <a-button
+              type="link"
+              danger
+              :disabled="receiptAllocationRows.length === 1"
+              class="receipt-allocation-delete"
+              @click="receiptAllocationRows.splice(index, 1)"
+            >
               删除
             </a-button>
-          </a-col>
-        </a-row>
-        <a-button :disabled="receiptAllocationRows.length >= openReceivableOptions.length" @click="addReceiptAllocationRow">
+          </div>
+        </div>
+
+        <a-button
+          class="receipt-allocation-add"
+          :disabled="receiptAllocationRows.length >= openReceivableOptions.length"
+          @click="addReceiptAllocationRow"
+        >
           添加应收单
         </a-button>
-      </a-space>
-      <a-divider />
+      </div>
+
       <div class="receipt-allocation-summary">
-        <span>本次核销合计</span>
+        <div>
+          <span>本次核销合计</span>
+          <small>核销后剩余 {{ money(receiptAllocationRemaining) }}</small>
+        </div>
         <strong>{{ money(receiptAllocationTotal) }}</strong>
       </div>
     </a-modal>
 
-    <a-modal v-model:open="cashBalanceOpen" :title="editingBalanceId ? '修改余额记录' : '新增余额记录'" width="760px" :mask-closable="false" ok-text="保存" cancel-text="取消" @ok="saveCashBalance">
+    <a-modal v-model:open="cashBalanceOpen" :title="editingBalanceId ? '修改余额记录' : '新增余额记录'" width="760px" :mask-closable="false" :confirm-loading="saving" :closable="!saving" :keyboard="!saving" :cancel-button-props="{ disabled: saving }" ok-text="保存" cancel-text="取消" @ok="saveCashBalance">
       <a-form layout="vertical">
         <a-row :gutter="16">
-          <a-col :xs="24" :md="12">
-            <a-form-item label="统计日期" required>
-              <a-input v-model:value="cashBalanceForm.balance_date" placeholder="YYYY-MM-DD" />
-            </a-form-item>
-          </a-col>
           <a-col :xs="24" :md="12">
             <a-form-item label="主体名称" required>
               <a-input v-model:value="cashBalanceForm.company_name" placeholder="请输入公司/主体" />
@@ -3493,17 +3790,17 @@ onMounted(() => {
           </a-col>
           <a-col :xs="24" :md="12">
             <a-form-item label="账户名称" required>
-              <a-input v-model:value="cashBalanceForm.account_name" placeholder="请输入账户名称" />
+              <a-input v-model:value="cashBalanceForm.account_name" placeholder="如：基本户、一般户" />
             </a-form-item>
           </a-col>
           <a-col :xs="24" :md="12">
-            <a-form-item label="账号尾号" required>
-              <a-input v-model:value="cashBalanceForm.account_no_tail" placeholder="请输入账号尾号" />
+            <a-form-item label="账号" required>
+              <a-input v-model:value="cashBalanceForm.account_no_tail" placeholder="请输入完整账号" />
             </a-form-item>
           </a-col>
           <a-col :xs="24" :md="12">
             <a-form-item label="余额" required>
-              <a-input-number v-model:value="cashBalanceForm.balance_amount" :precision="2" :min="0" style="width: 100%;" />
+              <business-input-number v-model:value="cashBalanceForm.balance_amount" :precision="2" :min="0" style="width: 100%;" />
             </a-form-item>
           </a-col>
           <a-col :span="24">
@@ -3515,8 +3812,58 @@ onMounted(() => {
       </a-form>
     </a-modal>
 
+    <a-modal
+      v-model:open="cashBalanceHistoryOpen"
+      title="账户资金变动"
+      width="980px"
+      :footer="null"
+    >
+      <div v-if="activeCashBalance" class="cash-balance-history-head">
+        <div>
+          <span>账户</span>
+          <strong>{{ cashBalanceOptionLabel(activeCashBalance) }}</strong>
+        </div>
+        <div>
+          <span>当前余额</span>
+          <strong>{{ money(activeCashBalance.balance_amount) }}</strong>
+        </div>
+      </div>
+      <a-table
+        row-key="id"
+        size="small"
+        :pagination="false"
+        :data-source="activeCashBalanceMovements"
+        :scroll="{ x: 1100 }"
+      >
+        <a-table-column title="入账时间" data-index="postedAt" width="170" />
+        <a-table-column title="来款流水" data-index="receiptCode" width="170" />
+        <a-table-column title="付款方" data-index="payerName" width="180" />
+        <a-table-column title="到账金额" data-index="amount" width="130">
+          <template #default="{ text }">
+            <strong class="cash-increase">+{{ money(text) }}</strong>
+          </template>
+        </a-table-column>
+        <a-table-column title="变动前" data-index="balanceBefore" width="130">
+          <template #default="{ text }">
+            {{ money(text) }}
+          </template>
+        </a-table-column>
+        <a-table-column title="变动后" data-index="balanceAfter" width="130">
+          <template #default="{ text }">
+            {{ money(text) }}
+          </template>
+        </a-table-column>
+        <a-table-column title="核销应收单" data-index="receivableCodes" width="190">
+          <template #default="{ text }">
+            {{ Array.isArray(text) && text.length ? text.join('、') : '待核销' }}
+          </template>
+        </a-table-column>
+        <a-table-column title="经办人" data-index="operator" width="110" />
+      </a-table>
+    </a-modal>
+
     <a-modal v-model:open="batchBalanceOpen" title="批量录入余额" width="1100px" :mask-closable="false" ok-text="确认汇总" cancel-text="取消" @ok="openBatchConfirm">
-      <a-alert mb-3 type="info" show-icon :message="`当前批量合计 ${money(batchBalanceTotal)}，录入后将生成当天现金余额记录。`" />
+      <a-alert mb-3 type="info" show-icon :message="`当前批量合计 ${money(batchBalanceTotal)}。`" />
       <a-table
         row-key="index"
         size="small"
@@ -3525,11 +3872,6 @@ onMounted(() => {
         :data-source="batchBalanceRows"
         :scroll="{ x: batchBalanceTableScrollX }"
       >
-        <a-table-column title="统计日期" data-index="balance_date" width="130">
-          <template #default="{ record }">
-            <a-input v-model:value="record.balance_date" />
-          </template>
-        </a-table-column>
         <a-table-column title="主体名称" data-index="company_name" width="190">
           <template #default="{ record }">
             <a-input v-model:value="record.company_name" />
@@ -3545,14 +3887,14 @@ onMounted(() => {
             <a-input v-model:value="record.account_name" />
           </template>
         </a-table-column>
-        <a-table-column title="账号尾号" data-index="account_no_tail" width="110">
+        <a-table-column title="账号" data-index="account_no_tail" width="220">
           <template #default="{ record }">
             <a-input v-model:value="record.account_no_tail" />
           </template>
         </a-table-column>
         <a-table-column title="余额" data-index="balance_amount" width="130">
           <template #default="{ record }">
-            <a-input-number v-model:value="record.balance_amount" :precision="2" :min="0" style="width: 100%;" />
+            <business-input-number v-model:value="record.balance_amount" :precision="2" :min="0" style="width: 100%;" />
           </template>
         </a-table-column>
         <a-table-column title="备注" data-index="remark" width="150">
@@ -3570,13 +3912,13 @@ onMounted(() => {
         <template #summary>
           <a-table-summary fixed>
             <a-table-summary-row class="cash-summary-row">
-              <a-table-summary-cell :index="0" :col-span="5">
+              <a-table-summary-cell :index="0" :col-span="4">
                 批量录入总合计
               </a-table-summary-cell>
-              <a-table-summary-cell :index="5">
+              <a-table-summary-cell :index="4">
                 {{ money(batchBalanceTotal) }}
               </a-table-summary-cell>
-              <a-table-summary-cell :index="6" :col-span="2">
+              <a-table-summary-cell :index="5" :col-span="2">
                 <a-button type="link" size="small" @click="addBatchBalanceRow">
                   增加一行
                 </a-button>
@@ -3587,8 +3929,8 @@ onMounted(() => {
       </a-table>
     </a-modal>
 
-    <a-modal v-model:open="batchConfirmOpen" title="确认批量余额汇总" width="680px" :mask-closable="false" ok-text="确认提交" cancel-text="返回修改" @ok="submitBatchBalances">
-      <a-alert mb-3 type="warning" show-icon message="提交后将按统计日期、主体、银行和账号尾号覆盖或新增当天余额记录。" />
+    <a-modal v-model:open="batchConfirmOpen" title="确认批量余额汇总" width="680px" :mask-closable="false" :confirm-loading="saving" :closable="!saving" :keyboard="!saving" :cancel-button-props="{ disabled: saving }" ok-text="确认提交" cancel-text="返回修改" @ok="submitBatchBalances">
+      <a-alert mb-3 type="warning" show-icon message="提交后将按主体、银行和账号覆盖或新增余额记录。" />
       <a-descriptions bordered :column="1" size="small">
         <a-descriptions-item label="总汇总">
           {{ money(batchBalanceTotal) }}
@@ -3602,645 +3944,5 @@ onMounted(() => {
 </template>
 
 <style scoped lang="less">
-.finance-workflow {
-  margin-bottom: 16px;
-  padding: 16px;
-  border: 1px solid var(--admin-border-subtle);
-  border-radius: 8px;
-  background: var(--admin-surface);
-}
-
-.finance-workflow__header {
-  display: flex;
-  gap: 16px;
-  align-items: flex-start;
-  justify-content: space-between;
-  margin-bottom: 14px;
-
-  h2 {
-    margin: 0;
-    color: var(--admin-text);
-    font-size: 16px;
-    font-weight: 650;
-    line-height: 1.4;
-  }
-
-  p {
-    margin: 3px 0 0;
-    color: var(--admin-text-secondary);
-    font-size: 13px;
-  }
-}
-
-.finance-workflow__steps {
-  display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
-  overflow: hidden;
-  border: 1px solid var(--admin-border-subtle);
-  border-radius: 6px;
-}
-
-.finance-step {
-  position: relative;
-  display: grid;
-  grid-template-columns: 24px minmax(0, 1fr) auto;
-  gap: 9px;
-  align-items: center;
-  min-height: 64px;
-  padding: 10px 12px;
-  background: var(--admin-surface);
-  color: inherit;
-  text-decoration: none;
-
-  & + & {
-    border-left: 1px solid var(--admin-border-subtle);
-  }
-
-  &:hover,
-  &:focus-visible {
-    background: var(--admin-bg-subtle, #f8fafc);
-  }
-
-  &:focus-visible {
-    outline: 2px solid var(--admin-primary);
-    outline-offset: -2px;
-  }
-
-  &.is-warning {
-    background: #fffaf0;
-  }
-}
-
-.finance-step__index {
-  display: inline-flex;
-  width: 24px;
-  height: 24px;
-  align-items: center;
-  justify-content: center;
-  border-radius: 50%;
-  background: #e8eef7;
-  color: #334155;
-  font-size: 12px;
-  font-weight: 700;
-}
-
-.finance-step.is-done .finance-step__index {
-  background: #dcfce7;
-  color: #166534;
-}
-
-.finance-step.is-active .finance-step__index {
-  background: #dbeafe;
-  color: #1d4ed8;
-}
-
-.finance-step.is-warning .finance-step__index {
-  background: #fef3c7;
-  color: #92400e;
-}
-
-.finance-step__content {
-  display: grid;
-  min-width: 0;
-  gap: 2px;
-
-  strong {
-    color: var(--admin-text);
-    font-size: 13px;
-    font-weight: 650;
-  }
-
-  small {
-    overflow: hidden;
-    color: var(--admin-text-secondary);
-    font-size: 12px;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-}
-
-.finance-step__count {
-  min-width: 22px;
-  color: var(--admin-text);
-  font-size: 15px;
-  font-weight: 700;
-  text-align: right;
-  font-variant-numeric: tabular-nums;
-}
-
-.finance-workflow__alert {
-  margin-top: 12px;
-}
-
-.oa-query {
-  :deep(.ant-form-item) {
-    margin-bottom: 0;
-  }
-
-  :deep(.ant-picker),
-  :deep(.ant-input),
-  :deep(.ant-select) {
-    width: 100%;
-  }
-}
-
-@media (max-width: 1100px) {
-  .finance-workflow__steps {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .finance-step + .finance-step {
-    border-left: 0;
-    border-top: 1px solid var(--admin-border-subtle);
-  }
-}
-
-@media (max-width: 640px) {
-  .finance-workflow__header {
-    flex-direction: column;
-  }
-
-  .finance-workflow__steps {
-    grid-template-columns: 1fr;
-  }
-}
-
-.trend-row {
-  display: grid;
-  grid-template-columns: 82px 1fr;
-  gap: 12px;
-  align-items: center;
-  margin-bottom: 14px;
-}
-
-.trend-chart {
-  min-width: 0;
-}
-
-.trend-legend {
-  display: flex;
-  justify-content: flex-end;
-  gap: 16px;
-  margin-bottom: 16px;
-  color: rgb(100 116 139);
-  font-size: 12px;
-
-  span {
-    display: inline-flex;
-    gap: 6px;
-    align-items: center;
-  }
-
-  i {
-    width: 10px;
-    height: 10px;
-    border-radius: 2px;
-
-    &.income {
-      background: #16a34a;
-    }
-
-    &.expense {
-      background: #ef4444;
-    }
-  }
-}
-
-.trend-month {
-  color: rgb(100 116 139);
-  font-size: 13px;
-}
-
-.trend-bars {
-  display: grid;
-  gap: 6px;
-  min-width: 0;
-}
-
-.trend-track {
-  min-width: 0;
-  overflow: hidden;
-  border-radius: 4px;
-  background: rgb(241 245 249);
-}
-
-.trend-bar {
-  min-width: min(88px, 100%);
-  height: 24px;
-  padding: 0 8px;
-  overflow: hidden;
-  border-radius: 4px;
-  color: #fff;
-  font-size: 12px;
-  line-height: 24px;
-  white-space: nowrap;
-
-  &.income {
-    background: #16a34a;
-  }
-
-  &.expense {
-    background: #ef4444;
-  }
-}
-
-.trend-net {
-  color: #15803d;
-  font-size: 12px;
-
-  &.negative {
-    color: #dc2626;
-  }
-}
-
-.share-line {
-  display: grid;
-  grid-template-columns: 48px 1fr;
-  gap: 12px;
-  align-items: center;
-  margin-bottom: 16px;
-}
-
-.dashboard-overview,
-.dashboard-workbench {
-  display: grid;
-  gap: 16px;
-  margin-bottom: 16px;
-}
-
-.dashboard-overview {
-  grid-template-columns: 2fr 1fr 1.25fr;
-  grid-template-areas: 'funds approval risk';
-  align-items: stretch;
-}
-
-.dashboard-workbench {
-  grid-template-columns: 1.2fr 1.1fr 0.8fr;
-  align-items: stretch;
-}
-
-.dashboard-funds-panel {
-  grid-area: funds;
-}
-
-.dashboard-approval-panel {
-  grid-area: approval;
-}
-
-.dashboard-risk-panel {
-  grid-area: risk;
-}
-
-.dashboard-panel,
-.dashboard-funds-panel {
-  height: 100%;
-
-  :deep(.ant-card-body) {
-    padding: 16px;
-  }
-}
-
-.dashboard-funds-panel :deep(.ant-card-body),
-.dashboard-module-panel :deep(.ant-card-body) {
-  display: flex;
-  flex-direction: column;
-}
-
-.panel-title-stack {
-  display: grid;
-  gap: 2px;
-
-  strong {
-    color: #0f172a;
-    font-size: 16px;
-    line-height: 1.4;
-  }
-
-  span {
-    color: #64748b;
-    font-size: 12px;
-    font-weight: 400;
-  }
-}
-
-.dashboard-funds-grid {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 12px;
-  height: 100%;
-}
-
-.dashboard-kpi-card {
-  min-height: 112px;
-  padding: 14px;
-  border: 1px solid #e5e7eb;
-  border-radius: 8px;
-  background: #fff;
-}
-
-.dashboard-kpi-label,
-.dashboard-kpi-hint {
-  color: #64748b;
-  font-size: 12px;
-}
-
-.dashboard-kpi-value {
-  margin: 8px 0 6px;
-  color: #0f172a;
-  font-size: 21px;
-  font-weight: 700;
-  line-height: 1.2;
-
-  &.tone-success {
-    color: #15803d;
-  }
-
-  &.tone-danger {
-    color: #b91c1c;
-  }
-
-  &.tone-warning {
-    color: #b45309;
-  }
-
-  &.tone-primary {
-    color: #1d4ed8;
-  }
-}
-
-.approval-breakdown-row {
-  margin-bottom: 16px;
-
-  &:last-child {
-    margin-bottom: 0;
-  }
-}
-
-.breakdown-title {
-  display: flex;
-  justify-content: space-between;
-  margin-bottom: 6px;
-  color: #334155;
-}
-
-.module-summary-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
-  height: 100%;
-}
-
-.quick-link-grid {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.module-summary-item {
-  display: block;
-  padding: 12px;
-  border: 1px solid #e5e7eb;
-  border-radius: 6px;
-  background: #fff;
-  color: inherit;
-  text-decoration: none;
-}
-
-.module-summary-item:hover {
-  border-color: #1677ff;
-}
-
-.module-summary-title {
-  margin-bottom: 8px;
-  color: #0f172a;
-  font-weight: 700;
-}
-
-.module-summary-metric {
-  display: flex;
-  justify-content: space-between;
-  gap: 8px;
-  color: #64748b;
-  font-size: 12px;
-
-  strong {
-    color: #0f172a;
-    font-weight: 650;
-  }
-}
-
-.risk-row {
-  display: flex;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 8px 0;
-  border-bottom: 1px solid #f1f5f9;
-
-  &:last-child {
-    border-bottom: 0;
-  }
-
-  div {
-    display: grid;
-    gap: 2px;
-  }
-
-  span {
-    color: #64748b;
-    font-size: 12px;
-    line-height: 1.45;
-  }
-
-  em {
-    color: #0f172a;
-    font-style: normal;
-    font-weight: 700;
-    white-space: nowrap;
-  }
-
-  &.risk-danger em {
-    color: #b91c1c;
-  }
-
-  &.risk-warning em {
-    color: #b45309;
-  }
-}
-
-.dashboard-quick-panel {
-  :deep(.ant-card-body) {
-    padding: 12px 16px 16px;
-  }
-}
-
-.quick-link-item {
-  display: flex;
-  min-width: 156px;
-  gap: 8px;
-  align-items: center;
-  padding: 8px 12px;
-  border: 1px solid #e5e7eb;
-  border-radius: 6px;
-  background: #fff;
-  color: inherit;
-  text-decoration: none;
-
-  &:hover {
-    border-color: #1677ff;
-    background: #f8fbff;
-  }
-
-  strong {
-    color: #0f172a;
-    white-space: nowrap;
-  }
-
-  span {
-    color: #64748b;
-    font-size: 12px;
-  }
-}
-
-.cash-sub-card {
-  height: 100%;
-}
-
-.subject-total-row {
-  display: flex;
-  gap: 12px;
-  align-items: center;
-  justify-content: space-between;
-  padding: 8px 0;
-  border-bottom: 1px solid #f1f5f9;
-
-  &.total {
-    margin-top: 4px;
-    padding: 10px 12px;
-    border-bottom: 0;
-    border-radius: 6px;
-    background: #eff6ff;
-    color: #1d4ed8;
-  }
-}
-
-.cash-balance-group {
-  margin-bottom: 18px;
-}
-
-.cash-group-title {
-  display: flex;
-  justify-content: space-between;
-  margin-bottom: 8px;
-  padding: 10px 12px;
-  border-radius: 6px;
-  background: #f8fafc;
-  font-weight: 600;
-}
-
-.cash-summary-row {
-  background: #fff7ed;
-  font-weight: 650;
-}
-
-.receipt-allocation-summary {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 10px 12px;
-  border-radius: 6px;
-  background: #f8fafc;
-
-  strong {
-    color: #1677ff;
-    font-size: 16px;
-  }
-}
-
-.danger-link {
-  color: #ff4d4f;
-}
-
-.oa-row-actions {
-  flex-wrap: nowrap;
-  white-space: nowrap;
-
-  :deep(.ant-btn-link) {
-    padding-inline: 4px;
-  }
-}
-
-.salary-inner-tabs {
-  margin-top: 12px;
-  margin-bottom: -8px;
-}
-
-.salary-amount {
-  display: inline-flex;
-  min-width: 76px;
-  justify-content: flex-end;
-  padding: 2px 8px;
-  border-radius: 4px;
-  font-weight: 650;
-}
-
-.salary-amount--wage {
-  background: #ecfdf5;
-  color: #047857;
-}
-
-.salary-amount--social {
-  background: #fff7ed;
-  color: #c2410c;
-}
-
-.oa-action-popover {
-  display: grid;
-  min-width: 92px;
-  gap: 4px;
-
-  :deep(.ant-btn) {
-    justify-content: flex-start;
-    padding-inline: 4px;
-  }
-}
-
-:deep(.ant-table-small .ant-table-thead > tr > th) {
-  white-space: nowrap;
-}
-
-:deep(.ant-table-small .ant-table-tbody > tr > td) {
-  padding: 8px;
-}
-
-@media (max-width: 900px) {
-  .dashboard-overview,
-  .dashboard-workbench,
-  .module-summary-grid {
-    grid-template-columns: 1fr;
-  }
-
-  .dashboard-overview {
-    grid-template-areas:
-      'funds'
-      'approval'
-      'risk';
-  }
-
-  .dashboard-funds-grid {
-    grid-template-columns: 1fr;
-  }
-}
-
-@media (min-width: 901px) and (max-width: 1280px) {
-  .dashboard-overview {
-    grid-template-columns: minmax(0, 1.6fr) minmax(280px, 1fr);
-    grid-template-areas:
-      'funds approval'
-      'risk risk';
-  }
-
-  .dashboard-workbench {
-    grid-template-columns: 1fr 1fr;
-  }
-}
+@import './oa-module.less';
 </style>

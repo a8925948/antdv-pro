@@ -26,8 +26,9 @@ describe('import progress', () => {
       columns: [],
       duplicateDetails: ['A 已存在'],
       errorDetails: ['第 3 行错误'],
+      summaryNo: '26617903020500031627',
     })
-    expect(state).toMatchObject({ totalRecords: 3, validRecords: 2, errorRecords: 1, duplicateRecords: 1, pendingCreate: 2, pendingUpdate: 0, status: 'pending', canConfirm: true })
+    expect(state).toMatchObject({ totalRecords: 3, validRecords: 2, errorRecords: 1, duplicateRecords: 1, pendingCreate: 2, pendingUpdate: 0, status: 'pending', canConfirm: true, summaryNo: '26617903020500031627' })
     expect(state.selectedRowKeys).toEqual(['A', 'import-row-1'])
   })
 

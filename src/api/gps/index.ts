@@ -114,6 +114,13 @@ function gpsSyncRequestConfig(options: GpsSyncRequestOptions = {}) {
   }
 }
 
+function gpsReadRequestConfig(timeout = 45_000) {
+  return {
+    timeout,
+    errorNotification: false,
+  }
+}
+
 function accessParams() {
   const userStore = useUserStore()
   return {
@@ -123,15 +130,15 @@ function accessParams() {
 }
 
 export function getGpsProviderConfigsApi() {
-  return useGet<any[]>('/gps/provider-configs')
+  return useGet<any[]>('/gps/provider-configs', undefined, gpsReadRequestConfig())
 }
 
 export function getGpsVehiclesApi() {
-  return useGet<TransportVehicle[]>('/gps/vehicles', accessParams())
+  return useGet<TransportVehicle[]>('/gps/vehicles', accessParams(), gpsReadRequestConfig())
 }
 
 export function getGpsDevicesApi() {
-  return useGet<GpsDevice[]>('/gps/devices')
+  return useGet<GpsDevice[]>('/gps/devices', undefined, gpsReadRequestConfig())
 }
 
 export function syncGpsDevicesApi(provider?: GpsProvider, options?: GpsSyncRequestOptions) {
@@ -155,7 +162,7 @@ export function getGpsVehicleLocationApi(vehicleId: string) {
 }
 
 export function getGpsVehicleTrackApi(vehicleId: string, params?: { startTime?: string, endTime?: string, provider?: GpsProvider }) {
-  return useGet<any>(`/gps/vehicles/${vehicleId}/track`, params)
+  return useGet<any>(`/gps/vehicles/${vehicleId}/track`, params, gpsReadRequestConfig(60_000))
 }
 
 export function getGpsAlarmsApi() {
@@ -171,7 +178,7 @@ export function getGpsVehicleStatusesApi() {
 }
 
 export function getGpsMapDataApi() {
-  return useGet<GpsMapData>('/gps/map-data', accessParams())
+  return useGet<GpsMapData>('/gps/map-data', accessParams(), gpsReadRequestConfig())
 }
 
 export function getGpsGeofencesApi() {
@@ -179,7 +186,7 @@ export function getGpsGeofencesApi() {
 }
 
 export function getGpsSyncLogsApi() {
-  return useGet<any[]>('/gps/sync-logs')
+  return useGet<any[]>('/gps/sync-logs', undefined, gpsReadRequestConfig())
 }
 
 export function handleGpsAlarmApi(id: string, data: { status: 'handled' | 'ignored', handleRemark?: string, operatorId?: string | number, operatorName?: string }) {
@@ -211,7 +218,7 @@ export function bindGpsGeofenceVehiclesApi(id: string, data: { vehicleIds: strin
 }
 
 export function getGpsOperationLogsApi() {
-  return useGet<GpsOperationLog[]>('/gps/operation-logs')
+  return useGet<GpsOperationLog[]>('/gps/operation-logs', undefined, gpsReadRequestConfig())
 }
 
 export function geocodeGpsAddressApi(address: string) {

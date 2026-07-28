@@ -14,7 +14,16 @@ const dataFile = resolveRuntimeJsonDataFile('hotel-revenue-records.json')
 
 function normalizeRows(rows: unknown): HotelRevenueRecord[] {
   return Array.isArray(rows)
-    ? rows.filter((row): row is HotelRevenueRecord => !!row && typeof row === 'object' && !!(row as any).id && !!(row as any).date)
+    ? rows
+        .filter((row): row is HotelRevenueRecord => !!row && typeof row === 'object' && !!(row as any).id && !!(row as any).date)
+        .map((row) => {
+          // These legacy booking dimensions are intentionally no longer part of hotel revenue.
+          const current = { ...(row as any) }
+          delete current.roomOrOrderNo
+          delete current.roomType
+          delete current.channel
+          return current
+        })
     : []
 }
 

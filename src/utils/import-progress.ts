@@ -29,6 +29,7 @@ export function createImportConfirmState(): ImportConfirmState {
     fileName: '',
     fileSize: 0,
     fileSizeText: '-',
+    summaryNo: '',
     totalRecords: 0,
     validRecords: 0,
     errorRecords: 0,
@@ -81,6 +82,7 @@ export function setImportPendingState(
     columns: ImportTableColumn[]
     errorDetails?: string[]
     duplicateDetails?: string[]
+    summaryNo?: string
   },
 ) {
   const errorDetails = options.errorDetails ?? []
@@ -105,6 +107,7 @@ export function setImportPendingState(
     canConfirm: status === 'pending' && validRecords > 0,
     errorDetails,
     duplicateDetails,
+    summaryNo: options.summaryNo ?? '',
     previewRows: options.rows,
     selectedRowKeys: options.rows.map((row, index) => String(row.code ?? `import-row-${index}`)),
     columns: options.columns,

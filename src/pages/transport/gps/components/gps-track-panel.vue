@@ -7,6 +7,7 @@ defineProps<{
   columns: Array<Record<string, any>>
   scrollX: number
   currentPoint?: Record<string, any>
+  loading: boolean
   playing: boolean
   lastSyncAt: string
   statusColor: (value: string) => string
@@ -29,7 +30,7 @@ const playSpeed = defineModel<number>('playSpeed', { required: true })
       </a-select-option>
     </a-select>
     <a-range-picker v-model:value="trackRange" show-time />
-    <a-button type="primary" @click="emit('load')">
+    <a-button type="primary" :loading="loading" @click="emit('load')">
       查询轨迹
     </a-button>
     <a-button :disabled="!points.length || playing" @click="emit('play')">
@@ -51,7 +52,7 @@ const playSpeed = defineModel<number>('playSpeed', { required: true })
     </a-select>
     <span v-if="currentPoint">当前：{{ currentPoint.locationTime }} / {{ currentPoint.speed }}公里/小时</span>
   </a-space>
-  <a-table row-key="id" :columns="columns" :data-source="points" :pagination="{ defaultPageSize: 10, pageSizeOptions: ['10', '20', '50', '100'], showSizeChanger: true }" :scroll="{ x: scrollX }">
+  <a-table row-key="id" :loading="loading" :columns="columns" :data-source="points" :locale="{ emptyText: '所选时间段内暂无轨迹数据' }" :pagination="{ defaultPageSize: 10, pageSizeOptions: ['10', '20', '50', '100'], showSizeChanger: true }" :scroll="{ x: scrollX }">
     <template #bodyCell="{ column, record }">
       <template v-if="column.dataIndex === 'pointType'">
         <a-tag :color="statusColor(record.pointType)">

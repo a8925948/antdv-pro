@@ -22,6 +22,8 @@ export interface RegulatoryFeeModel {
   rejectedAt?: string
   revokedAt?: string
   remark?: string
+  attachmentName?: string
+  attachmentUrl?: string
   createdAt?: string
   updatedAt?: string
   deletedAt?: string
@@ -46,6 +48,8 @@ export interface RegulatoryFeePayload {
   validStartDate: string
   validEndDate: string
   remark?: string
+  attachmentName?: string
+  attachmentUrl?: string
 }
 
 export interface RegulatoryFeeQuery {

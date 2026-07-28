@@ -32,6 +32,7 @@ describe('transport operation store', () => {
       maintenance: [],
       inventoryMovements: [],
       vehicleLoans: [],
+      baseCompanies: [],
       baseCustomers: [],
       baseVehicles: [],
       baseCrews: [],
@@ -44,7 +45,7 @@ describe('transport operation store', () => {
       orders: [{ code: 'O1', plateNo: '青H 75141' }],
       maintenance: [{ id: 1, plateNo: '青 H 75141' }],
       driverPayrolls: [{ code: 'P1', plateNos: '青H 75141、青H 59588' }],
-      baseVehicles: [{ code: '青H 75141', plateNo: '青H 75141' }],
+      baseVehicles: [{ code: '青H 75141', plateNo: '青H 75141', area: '格尔木' }],
       baseCrews: [{ code: 'C1', plateNo: '青H 75141' }],
     })
 
@@ -53,7 +54,7 @@ describe('transport operation store', () => {
     expect(dataset.orders[0].plateNo).toBe('青H75141')
     expect(dataset.maintenance[0].plateNo).toBe('青H75141')
     expect(dataset.driverPayrolls[0].plateNos).toBe('青H75141、青H59588')
-    expect(dataset.baseVehicles[0]).toMatchObject({ code: '青H75141', plateNo: '青H75141' })
+    expect(dataset.baseVehicles[0]).toMatchObject({ code: '青H75141', plateNo: '青H75141', area: '青海' })
     expect(dataset.baseCrews[0].plateNo).toBe('青H75141')
   })
 
@@ -109,14 +110,18 @@ describe('transport operation store', () => {
     expect(result.baseCustomers[1]).toMatchObject({ code: 'KH006', name: '乙公司', progress: '0', source: '运输订单' })
   })
 
-  it('shares valid order vehicles and routes with base archives without importing damaged placeholders', async () => {
+  it('shares valid order vehicles but keeps configured route archives unchanged', async () => {
     mocks.readJsonFile.mockReturnValue({
       orders: [
         { code: 'O1', plateNo: '青H59588', trailerNo: '青A1234挂', driver: '张三', routeLine: '西宁至格尔木', loadingAddress: '西宁', unloadingAddress: '格尔木', shipDate: '2026-07-01' },
         { code: 'O2', plateNo: '损坏车牌-1265', routeLine: '西宁 / 格尔木' },
       ],
       baseVehicles: [],
-      baseRoutes: [],
+      baseRoutes: [
+        { code: 'LX0050', name: 'Excel 配置路线', source: '基础资料' },
+        { code: 'LX0118', name: '旧页面派生路线', source: '运输订单' },
+        { code: 'LX0119', name: '服务端派生路线', source: '运输订单自动建档' },
+      ],
     })
 
     const result = await transportOperationStore.getDataset()
@@ -124,17 +129,42 @@ describe('transport operation store', () => {
     expect(result.baseVehicles).toEqual([
       expect.objectContaining({ code: '青H59588', plateNo: '青H59588', driverName: '张三', source: '运输订单自动建档' }),
     ])
-    expect(result.baseRoutes).toHaveLength(1)
-    expect(result.baseRoutes[0]).toMatchObject({ code: 'LX001', name: '西宁至格尔木', source: '运输订单自动建档' })
+    expect(result.baseRoutes).toEqual([
+      expect.objectContaining({ code: 'LX0050', name: 'Excel 配置路线', source: '基础资料' }),
+    ])
   })
 
   it.each([
     ['orders', [{ code: 'O1' }, { code: 'O1' }]],
     ['vehicleLoans', [{ contractNo: 'L1' }, { contractNo: 'L1' }]],
+    ['baseCompanies', [{ code: 'GS001' }, { code: 'GS001' }]],
     ['baseCustomers', [{ id: 9 }, { id: 9 }]],
   ])('rejects duplicate business keys in %s before persistence', async (type, records) => {
     await expect(transportOperationStore.replaceDataset({ [type]: records })).rejects.toThrow(`运输运营 ${type} 存在重复标识`)
     expect(mocks.writeJsonFile).not.toHaveBeenCalled()
+  })
+
+  it('rejects an ETC summary number imported from different files', async () => {
+    await expect(transportOperationStore.replaceDataset({
+      etc: [
+        { code: '26617903020500031627-001', summaryNo: '26617903020500031627', sourceFileHash: 'a'.repeat(64), sourceFileRow: '1' },
+        { code: '26617903020500031627-002', summaryNo: '26617903020500031627', sourceFileHash: 'b'.repeat(64), sourceFileRow: '2' },
+      ],
+    })).rejects.toThrow('ETC汇总单号 26617903020500031627 已存在，禁止重复录入')
+  })
+
+  it('allows all journey rows belonging to one ETC summary file', async () => {
+    await expect(transportOperationStore.replaceDataset({
+      etc: [
+        { code: '26617903020500031627-001', summaryNo: '26617903020500031627', sourceFileHash: 'a'.repeat(64), sourceFileRow: '1' },
+        { code: '26617903020500031627-002', summaryNo: '26617903020500031627', sourceFileHash: 'a'.repeat(64), sourceFileRow: '2' },
+      ],
+    })).resolves.toBeDefined()
+  })
+
+  it('rejects the same ETC PDF row twice', async () => {
+    const row = { code: '26617903020500031627-1', sourceFileHash: 'a'.repeat(64), sourceFileRow: '1' }
+    await expect(transportOperationStore.replaceDataset({ etc: [row, { ...row }] })).rejects.toThrow('运输运营 etc 存在重复标识')
   })
 
   it('rejects local reads and writes when MySQL is mandatory', async () => {
@@ -176,6 +206,7 @@ describe('transport operation store', () => {
       maintenance: [],
       inventoryMovements: [],
       vehicleLoans: [{ contractNo: 'L1', plateNo: '青A001', lender: '银行', loanAmount: '10,000', payments: [{ periodNo: 1, paymentDate: '2026-08-01', amount: 1000 }] }],
+      baseCompanies: [],
       baseCustomers: [],
       baseVehicles: [],
       baseCrews: [],
@@ -206,6 +237,7 @@ describe('transport operation store', () => {
       maintenance: [],
       inventoryMovements: [],
       vehicleLoans: [],
+      baseCompanies: [],
       baseCustomers: [],
       baseVehicles: [],
       baseCrews: [],

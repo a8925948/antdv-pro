@@ -1,3 +1,5 @@
+import process from 'node:process'
+
 const baseUrl = process.env.LIVE_SITE_URL || 'https://www.erpxt.online'
 const username = process.env.LIVE_SITE_USERNAME || 'admin'
 const password = process.env.LIVE_SITE_PASSWORD
@@ -122,7 +124,7 @@ async function loginInBrowser(page) {
 
   await page.locator('input[type="text"]').fill(username)
   await page.locator('input[type="password"]').fill(password)
-  await page.locator('button').filter({ hasText: /Login|登录/ }).click()
+  await page.locator('button').filter({ hasText: /Login|登\s*录/ }).click()
   await page.waitForTimeout(5000)
 
   const afterLogin = await readPageState(page)
@@ -205,6 +207,9 @@ async function verifyBrowser() {
     console.log('[live:verify] 页面级验证通过')
   }
   finally {
+    const token = await page.evaluate(() => localStorage.getItem('Authorization')).catch(() => '')
+    if (token)
+      await getJson(`${baseUrl}/api/logout`, token).catch(() => undefined)
     await browser.close()
   }
 }

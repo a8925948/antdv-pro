@@ -48,6 +48,31 @@ export function resolve808GpsCoordinates(item: Record<string, any>) {
   }
 }
 
+function format808GpsTime(value: string | undefined, fallback: Date) {
+  const parsed = value ? new Date(value) : fallback
+  if (Number.isNaN(parsed.getTime()))
+    throw new Error('轨迹查询时间格式无效')
+  return new Date(parsed.getTime() + 8 * 60 * 60 * 1000)
+    .toISOString()
+    .slice(0, 19)
+    .replace('T', ' ')
+}
+
+export function normalize808GpsTrackRange(startTime?: string, endTime?: string, currentTime = new Date()) {
+  const end = endTime ? new Date(endTime) : currentTime
+  if (Number.isNaN(end.getTime()))
+    throw new Error('轨迹查询结束时间格式无效')
+  const start = startTime ? new Date(startTime) : new Date(end.getTime() - 24 * 60 * 60 * 1000)
+  if (Number.isNaN(start.getTime()))
+    throw new Error('轨迹查询开始时间格式无效')
+  if (start.getTime() > end.getTime())
+    throw new Error('轨迹查询开始时间不能晚于结束时间')
+  return {
+    startTime: format808GpsTime(start.toISOString(), start),
+    endTime: format808GpsTime(end.toISOString(), end),
+  }
+}
+
 export function create808GpsProvider(): GpsProviderAdapter {
   const env = (name: string) => process.env[name] || ''
   const baseUrl = (env('GPS_808_BASE_URL') || 'https://www.qhzfclw.com').replace(/\/+$/, '')
@@ -95,7 +120,7 @@ export function create808GpsProvider(): GpsProviderAdapter {
     return session
   }
 
-  async function request(path: string, params: Record<string, any> = {}, authenticated = true, retry = true): Promise<Record<string, any>> {
+  async function request(path: string, params: Record<string, any> = {}, authenticated = true, retry = true, timeout = 20_000): Promise<Record<string, any>> {
     assertConfigured()
     if (authenticated && !session)
       await login()
@@ -106,14 +131,14 @@ export function create808GpsProvider(): GpsProviderAdapter {
       if (value !== undefined && value !== null && value !== '')
         query.set(key, String(value))
     })
-    const response = await fetch(`${baseUrl}${path}?${query}`, { signal: AbortSignal.timeout(20_000) })
+    const response = await fetch(`${baseUrl}${path}?${query}`, { signal: AbortSignal.timeout(timeout) })
     if (!response.ok)
       throw new Error(`808GPS 请求失败: HTTP ${response.status}`)
     const data = await response.json() as Record<string, any>
     if (Number(data.result ?? 0) === 5 && authenticated && retry && !token) {
       session = ''
       await login()
-      return request(path, params, authenticated, false)
+      return request(path, params, authenticated, false, timeout)
     }
     if (Number(data.result ?? 0) !== 0)
       throw new Error(`808GPS 接口返回错误: ${data.result}${data.message ? ` (${data.message})` : ''}`)
@@ -144,16 +169,17 @@ export function create808GpsProvider(): GpsProviderAdapter {
       return groups.flat()
     },
     async getTrack(deviceId, startTime, endTime) {
+      const range = normalize808GpsTrackRange(startTime, endTime)
       const data = await request('/StandardApiAction_queryTrackDetail.action', {
         devIdno: deviceId,
-        begintime: startTime,
-        endtime: endTime,
+        begintime: range.startTime,
+        endtime: range.endTime,
         distance: 0,
         parkTime: 0,
         currentPage: 1,
         pageRecords: 5000,
         toMap: 2,
-      })
+      }, true, true, 45_000)
       return (Array.isArray(data.tracks) ? data.tracks : []).map((item: Record<string, any>) => mapLocation(item, deviceId))
     },
     async syncAlarms(deviceIds) {

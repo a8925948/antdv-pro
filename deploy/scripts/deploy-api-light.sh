@@ -5,10 +5,17 @@ PROJECT_DIR="${PROJECT_DIR:-/opt/enterprise-system}"
 CONTAINER="${API_CONTAINER:-enterprise-system-api-1}"
 IMAGE="${API_IMAGE:-enterprise-system-api:latest}"
 READY_URL="${READY_URL:-https://www.erpxt.online/api/readyz}"
+LOCK_DIR="${DEPLOY_LOCK_DIR:-/tmp/enterprise-system-deploy.lock}"
 ROLLBACK_DIR="$(mktemp -d)"
+
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+  echo "[deploy:api] another deployment is already running: $LOCK_DIR" >&2
+  exit 2
+fi
 
 cleanup() {
   rm -rf "$ROLLBACK_DIR"
+  rmdir "$LOCK_DIR" 2>/dev/null || true
 }
 
 rollback() {

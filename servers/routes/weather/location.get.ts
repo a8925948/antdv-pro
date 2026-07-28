@@ -30,7 +30,10 @@ export default defineEventHandler(async (event) => {
   }
   catch (error) {
     console.error('[weather-location] reverse geocode failed', error)
-    setResponseStatus(event, 502)
-    return { code: 502, msg: '地点解析暂时不可用' }
+    return {
+      code: 200,
+      data: { location: '当前位置', degraded: true },
+      msg: '地点解析暂时不可用，已使用当前位置',
+    }
   }
 })

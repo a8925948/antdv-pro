@@ -14,6 +14,7 @@ defineProps<{
   pagination: Row
   scrollX: number
   loading: boolean
+  readOnly?: boolean
   statusColor: (status: string) => string
   columnKey: (dataIndex: unknown) => string
 }>()
@@ -106,7 +107,7 @@ const statuses = ['正常', '在职', '停用', '离职']
       <a-col :xs="24" :xl="5">
         <a-card title="组织树" :bordered="false" class="org-tree-card">
           <template #extra>
-            <a-button size="small" @click="emit('create', '部门')">
+            <a-button v-if="!readOnly" size="small" @click="emit('create', '部门')">
               新增部门
             </a-button>
           </template>
@@ -127,7 +128,7 @@ const statuses = ['正常', '在职', '停用', '离职']
             <a-space wrap>
               <a-button @click="emit('export')">
                 导出
-              </a-button><a-button type="primary" @click="emit('create', '员工')">
+              </a-button><a-button v-if="!readOnly" type="primary" @click="emit('create', '员工')">
                 新增员工
               </a-button>
             </a-space>
@@ -147,7 +148,7 @@ const statuses = ['正常', '在职', '停用', '离职']
             <a-tab-pane key="employees" tab="员工管理" /><a-tab-pane key="positions" tab="岗位管理" /><a-tab-pane key="departments" tab="部门管理" />
           </a-tabs>
           <div mb-3>
-            <a-button type="primary" @click="emit('create', activeTab === 'departments' ? '部门' : activeTab === 'positions' ? '岗位' : '员工')">
+            <a-button v-if="!readOnly" type="primary" @click="emit('create', activeTab === 'departments' ? '部门' : activeTab === 'positions' ? '岗位' : '员工')">
               新增{{ activeTab === 'departments' ? '部门' : activeTab === 'positions' ? '岗位' : '员工' }}
             </a-button>
           </div>
@@ -156,7 +157,7 @@ const statuses = ['正常', '在职', '停用', '离职']
               <a-tag v-if="column.dataIndex === 'status'" :color="statusColor(record.status)">
                 {{ record.status }}
               </a-tag>
-              <a-space v-else-if="column.dataIndex === 'action'" wrap>
+              <a-space v-else-if="column.dataIndex === 'action' && !readOnly" wrap>
                 <a @click="emit('detail', record)">查看</a><a @click="emit('edit', record)">编辑</a><a-popconfirm title="确定删除该记录？" ok-type="danger" @confirm="emit('delete', record)">
                   <a danger>删除</a>
                 </a-popconfirm><a-popconfirm title="启用/停用会影响下级与审批关系，确定继续？" @confirm="emit('toggle', record)">

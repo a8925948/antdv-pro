@@ -1,6 +1,6 @@
 import dayjs from 'dayjs'
 import { describe, expect, it } from 'vitest'
-import { calculateTransportFreight, calculateTransportFreightExcludingTax, getTransportFreightFormula, isFeeInClosingOrderPeriod, matchesOperationPeriod, matchesOperationQuery, mergeTransportRecords, normalizeOperationPlateNo, operationAggregationKey, requiresTransportCrewBinding } from './transport-operation'
+import { calculateTransportFreight, calculateTransportFreightExcludingTax, getTransportFreightFormula, isFeeInClosingOrderPeriod, matchesOperationPeriod, matchesOperationQuery, mergeTransportRecords, normalizeOperationPlateNo, operationAggregationKey } from './transport-operation'
 
 const julyOrder = {
   date: '2026-07-09',
@@ -25,13 +25,6 @@ describe('transport operation matching', () => {
     expect(calculateTransportFreightExcludingTax(1090)).toBeCloseTo(1000)
     expect(calculateTransportFreightExcludingTax(1000)).toBeCloseTo(917.43119266)
     expect(calculateTransportFreightExcludingTax(0)).toBe(0)
-  })
-
-  it('enforces crew binding only after the historical import cutoff', () => {
-    expect(requiresTransportCrewBinding('2026-07-14')).toBe(false)
-    expect(requiresTransportCrewBinding('2026/07/15')).toBe(true)
-    expect(requiresTransportCrewBinding('2026-07-16')).toBe(true)
-    expect(requiresTransportCrewBinding('')).toBe(true)
   })
 
   it('merges imported orders without dropping existing records', () => {

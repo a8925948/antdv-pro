@@ -18,7 +18,7 @@ export function buildOrganizationTree(
   const nodesByParent = new Map<string, OrganizationNode[]>()
 
   for (const item of list) {
-    const parentKey = getExpectedParentKey(item)
+    const parentKey = getExpectedParentKey(item, list)
     const siblings = nodesByParent.get(parentKey) || []
     siblings.push(item)
     nodesByParent.set(parentKey, siblings)
@@ -37,8 +37,15 @@ export function buildOrganizationTree(
   return buildChildren('root')
 }
 
-function getExpectedParentKey(item: OrganizationNode) {
+function getExpectedParentKey(item: OrganizationNode, list: OrganizationNode[]) {
   if (item.type === 'company' || !item.parentId)
     return 'root'
-  return `${item.type === 'department' ? 'company' : 'department'}:${item.parentId}`
+  if (item.type === 'post')
+    return `department:${item.parentId}`
+  const hasDepartmentParent = list.some(parent =>
+    parent.type === 'department'
+    && String(parent.id) === String(item.parentId)
+    && String(parent.id) !== String(item.id),
+  )
+  return `${hasDepartmentParent ? 'department' : 'company'}:${item.parentId}`
 }

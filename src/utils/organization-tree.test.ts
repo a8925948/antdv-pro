@@ -28,4 +28,15 @@ describe('buildOrganizationTree', () => {
     expect(() => buildOrganizationTree(organizations, () => 0)).not.toThrow()
     expect(buildOrganizationTree(organizations, () => 0)[0].children[0].children).toHaveLength(1)
   })
+
+  it('supports departments nested below another department', () => {
+    const organizations: OrganizationNode[] = [
+      { id: '1', type: 'company', name: 'Company', code: 'C1', sortNo: 1, status: 'enabled' },
+      { id: '10', parentId: '1', type: 'department', name: 'Management', code: 'D1', sortNo: 1, status: 'enabled' },
+      { id: '20', parentId: '10', type: 'department', name: 'Finance', code: 'D2', sortNo: 1, status: 'enabled' },
+    ]
+
+    const tree = buildOrganizationTree(organizations, () => 0)
+    expect(tree[0].children[0].children[0]).toMatchObject({ key: 'department:20', name: 'Finance' })
+  })
 })

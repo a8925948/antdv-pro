@@ -5,7 +5,7 @@ export default defineEventHandler(async (event) => {
   try {
     const body: any = await readBody(event)
     const meta = {
-      ip: getRequestIP(event) || '127.0.0.1',
+      ip: getRequestHeader(event, 'x-real-ip') || getRequestHeader(event, 'x-forwarded-for')?.split(',')[0]?.trim() || getRequestIP(event) || '127.0.0.1',
       userAgent: getRequestHeader(event, 'user-agent'),
     }
     const { type } = body

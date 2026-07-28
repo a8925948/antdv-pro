@@ -9,6 +9,7 @@ declare global {
   const EffectScope: typeof import('vue')['EffectScope']
   const STORAGE_AUTHORIZE_KEY: typeof import('../src/composables/authorization')['STORAGE_AUTHORIZE_KEY']
   const acceptHMRUpdate: typeof import('pinia')['acceptHMRUpdate']
+  const applyTransportOperationMutation: typeof import('../src/composables/transport-operation-data')['applyTransportOperationMutation']
   const asyncComputed: typeof import('@vueuse/core')['asyncComputed']
   const autoResetRef: typeof import('@vueuse/core')['autoResetRef']
   const breakpointsEnum: typeof import('../src/composables/query-breakpoints')['breakpointsEnum']
@@ -44,6 +45,7 @@ declare global {
   const eagerComputed: typeof import('@vueuse/core')['eagerComputed']
   const effectScope: typeof import('vue')['effectScope']
   const extendRef: typeof import('@vueuse/core')['extendRef']
+  const filterGpsFencesForRoute: typeof import('../src/composables/gps-location-address')['filterGpsFencesForRoute']
   const financialDateRangeValue: typeof import('../src/composables/financial-period-filter')['financialDateRangeValue']
   const findNearbyGpsFence: typeof import('../src/composables/gps-location-address')['findNearbyGpsFence']
   const flushTransportOperationData: typeof import('../src/composables/transport-operation-data')['flushTransportOperationData']
@@ -54,12 +56,14 @@ declare global {
   const ignorableWatch: typeof import('@vueuse/core')['ignorableWatch']
   const inject: typeof import('vue')['inject']
   const injectLocal: typeof import('@vueuse/core')['injectLocal']
+  const invalidateBusinessDictionaries: typeof import('../src/composables/business-dictionaries')['invalidateBusinessDictionaries']
   const isDark: typeof import('../src/composables/theme')['isDark']
   const isDefined: typeof import('@vueuse/core')['isDefined']
   const isProxy: typeof import('vue')['isProxy']
   const isReactive: typeof import('vue')['isReactive']
   const isReadonly: typeof import('vue')['isReadonly']
   const isRef: typeof import('vue')['isRef']
+  const loadBusinessDictionaries: typeof import('../src/composables/business-dictionaries')['loadBusinessDictionaries']
   const loadTransportOperationData: typeof import('../src/composables/transport-operation-data')['loadTransportOperationData']
   const lsLocaleState: typeof import('../src/composables/i18n-locale')['lsLocaleState']
   const makeDestructurable: typeof import('@vueuse/core')['makeDestructurable']
@@ -110,6 +114,7 @@ declare global {
   const refThrottled: typeof import('@vueuse/core')['refThrottled']
   const refWithControl: typeof import('@vueuse/core')['refWithControl']
   const resolveComponent: typeof import('vue')['resolveComponent']
+  const resolveGpsRouteStageByAddress: typeof import('../src/composables/gps-location-address')['resolveGpsRouteStageByAddress']
   const resolveRef: typeof import('@vueuse/core')['resolveRef']
   const resolveUnref: typeof import('@vueuse/core')['resolveUnref']
   const saveTransportOperationData: typeof import('../src/composables/transport-operation-data')['saveTransportOperationData']
@@ -133,6 +138,7 @@ declare global {
   const toRefs: typeof import('vue')['toRefs']
   const toValue: typeof import('vue')['toValue']
   const toggleDark: typeof import('../src/composables/theme')['toggleDark']
+  const transportBaseCompanyRows: typeof import('../src/composables/transport-operation-data')['transportBaseCompanyRows']
   const transportBaseCrewRows: typeof import('../src/composables/transport-operation-data')['transportBaseCrewRows']
   const transportBaseCustomerRows: typeof import('../src/composables/transport-operation-data')['transportBaseCustomerRows']
   const transportBaseRouteRows: typeof import('../src/composables/transport-operation-data')['transportBaseRouteRows']
@@ -185,6 +191,7 @@ declare global {
   const useBreakpoints: typeof import('@vueuse/core')['useBreakpoints']
   const useBroadcastChannel: typeof import('@vueuse/core')['useBroadcastChannel']
   const useBrowserLocation: typeof import('@vueuse/core')['useBrowserLocation']
+  const useBusinessDictionaries: typeof import('../src/composables/business-dictionaries')['useBusinessDictionaries']
   const useCached: typeof import('@vueuse/core')['useCached']
   const useClipboard: typeof import('@vueuse/core')['useClipboard']
   const useClipboardItems: typeof import('@vueuse/core')['useClipboardItems']
@@ -381,6 +388,9 @@ declare global {
   // @ts-ignore
   export type { FinancialPeriodFilterModel } from '../src/composables/financial-period-filter'
   import('../src/composables/financial-period-filter')
+  // @ts-ignore
+  export type { GpsRouteStage } from '../src/composables/gps-location-address'
+  import('../src/composables/gps-location-address')
   // @ts-ignore
   export type { TablePaginationProps, TableRowSelectionsProps, TableQueryOptions } from '../src/composables/table-query'
   import('../src/composables/table-query')

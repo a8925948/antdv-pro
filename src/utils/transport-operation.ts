@@ -29,8 +29,6 @@ export interface CodedTransportRecord {
   code: string
 }
 
-const CREW_BINDING_ENFORCED_FROM = '2026-07-15'
-
 export type TransportFreightFormula = '吨位×单价' | '吨位×运距×单价'
 
 export function getTransportFreightFormula(unitPrice: number): TransportFreightFormula {
@@ -49,11 +47,6 @@ export function calculateTransportFreight(
   return formula === '吨位×单价'
     ? weight * unitPrice
     : weight * distance * unitPrice
-}
-
-export function requiresTransportCrewBinding(shipDate: string) {
-  const date = dayjs(shipDate)
-  return !date.isValid() || !date.isBefore(CREW_BINDING_ENFORCED_FROM, 'day')
 }
 
 export function mergeTransportRecords<T extends CodedTransportRecord>(current: T[], incoming: T[]) {

@@ -3,6 +3,7 @@ import { createHash, randomBytes } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import process from 'node:process'
+import { businessDictionaryDefaultKeySet, businessDictionaryDefaults } from '../../shared/business-dictionaries'
 import { deleteDictionaryRecord, listDictionaryRecords, saveDictionaryRecord } from '../repositories/system/dictionary-repository'
 import { deleteOrganizationRecord, listOrganizationRecords, saveOrganizationRecord } from '../repositories/system/organization-repository'
 import { deleteRoleRecord, saveRoleRecord } from '../repositories/system/role-repository'
@@ -288,7 +289,16 @@ function ensureState(): SystemState {
     globalStore.__systemMockState = readDataFile() ?? (isDatabaseRequired() ? emptyState : defaultState)
   if (!globalStore.__systemMockSessions)
     globalStore.__systemMockSessions = new Map<string, SessionRecord>()
-  return globalStore.__systemMockState
+  const state = globalStore.__systemMockState
+  for (const item of businessDictionaryDefaults) {
+    if (!state.dictionaries.some(existing => existing.type === item.type && existing.value === item.value)) {
+      state.dictionaries.push({
+        ...item,
+        id: `business-${item.type}-${item.sortNo}`,
+      })
+    }
+  }
+  return state
 }
 
 function persist() {
@@ -380,13 +390,13 @@ function mapDbRole(row: DbRoleRow): RoleRecord {
 function mapDbDictionary(row: DbDictionaryRow): DictionaryItem {
   return {
     id: String(row.id),
-    type: row.type,
-    typeName: row.type_name,
-    label: row.label,
-    value: row.value,
+    type: String(repairMojibake(row.type)),
+    typeName: String(repairMojibake(row.type_name)),
+    label: String(repairMojibake(row.label)),
+    value: String(repairMojibake(row.value)),
     sortNo: row.sort_no,
     status: row.status,
-    remark: row.remark || undefined,
+    remark: row.remark ? String(repairMojibake(row.remark)) : undefined,
   }
 }
 
@@ -578,7 +588,7 @@ async function listOrganizationsFromDb() {
     ORDER BY c.id ASC
   `)
   const [deptRows] = await db.query<DbOrganizationRow[]>(`
-    SELECT d.id, d.parent_id, 'department' AS type, d.name, d.code, d.leader_user_id, u.nickname AS leader_name, d.sort_no, d.status
+    SELECT d.id, COALESCE(d.parent_id, d.company_id) AS parent_id, 'department' AS type, d.name, d.code, d.leader_user_id, u.nickname AS leader_name, d.sort_no, d.status
     FROM sys_department d
     LEFT JOIN sys_user u ON u.id = d.leader_user_id
     ORDER BY d.sort_no ASC, d.id ASC
@@ -623,6 +633,8 @@ async function listDictionariesFromDb(query: any = {}) {
   if (!db)
     return undefined
 
+  await ensureBusinessDictionariesInDb(db)
+
   const type = String(query.type ?? '')
   const conditions = ['1=1']
   const params: any[] = []
@@ -639,6 +651,20 @@ async function listDictionariesFromDb(query: any = {}) {
   `, params)
 
   return rows.map(mapDbDictionary)
+}
+
+let seededBusinessDictionaryDb: mysql.Pool | undefined
+
+async function ensureBusinessDictionariesInDb(db: mysql.Pool) {
+  if (seededBusinessDictionaryDb === db)
+    return
+  const placeholders = businessDictionaryDefaults.map(() => '(?, ?, ?, ?, ?, ?, ?, NOW(), NOW())').join(', ')
+  const params = businessDictionaryDefaults.flatMap(item => [item.type, item.typeName, item.label, item.value, item.sortNo, item.status, item.remark])
+  await db.execute(`
+    INSERT IGNORE INTO sys_dict (type, type_name, label, value, sort_no, status, remark, created_at, updated_at)
+    VALUES ${placeholders}
+  `, params)
+  seededBusinessDictionaryDb = db
 }
 
 async function hydrateSystemStateFromDb() {
@@ -1001,14 +1027,16 @@ export const systemStore = {
       this.addOperationLog({ module: '用户管理', action: 'create', content: `新增用户 ${user.nickname}`, operatorId: operator?.id, operatorName: operator?.nickname, targetId: user.id })
     }
     else {
+      const updatesPostAssignment = Object.prototype.hasOwnProperty.call(payload, 'postId')
+        || Object.prototype.hasOwnProperty.call(payload, 'postName')
       Object.assign(user, payload, {
         username,
         companyId: String(company?.id ?? user.companyId),
         companyName: String(company?.name ?? user.companyName),
         deptId: String(dept?.id ?? user.deptId),
         deptName: String(dept?.name ?? user.deptName),
-        postId: String(post?.id ?? user.postId),
-        postName: String(post?.name ?? user.postName),
+        postId: updatesPostAssignment ? String(post?.id ?? '') : user.postId,
+        postName: updatesPostAssignment ? String(post?.name ?? '') : user.postName,
         updatedAt: time,
       })
       normalizeUserRoles(user)
@@ -1181,6 +1209,9 @@ export const systemStore = {
   async deleteDictionary(id: string, token?: string) {
     const state = await hydrateSystemStateFromDb()
     const operator = currentOperator(token)
+    const target = state.dictionaries.find(item => item.id === id)
+    if (target && businessDictionaryDefaultKeySet.has(`${target.type}::${target.value}`))
+      throw new Error('系统内置业务主数据不能删除，请改为停用')
     const { operation } = deleteDictionaryRecord(state.dictionaries, id)
     this.addOperationLog(withOperator(operation, operator))
     await deleteDictionaryFromDb(id)

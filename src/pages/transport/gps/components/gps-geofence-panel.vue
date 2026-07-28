@@ -8,6 +8,7 @@ defineProps<{
   routes: Array<Record<string, string>>
   judgments: Map<string, FenceJudgment>
   selectedLocation?: GpsLocationLatest
+  saving?: boolean
 }>()
 const emit = defineEmits<{
   routeChange: []
@@ -74,18 +75,18 @@ const form = defineModel<GpsFenceForm>('form', { required: true })
           <a-row :gutter="12">
             <a-col :span="12">
               <a-form-item label="中心经度">
-                <a-input-number v-model:value="form.centerLongitude" w-full :min="-180" :max="180" :precision="6" />
+                <business-input-number v-model:value="form.centerLongitude" w-full :min="-180" :max="180" :precision="6" />
               </a-form-item>
             </a-col>
             <a-col :span="12">
               <a-form-item label="中心纬度">
-                <a-input-number v-model:value="form.centerLatitude" w-full :min="-90" :max="90" :precision="6" />
+                <business-input-number v-model:value="form.centerLatitude" w-full :min="-90" :max="90" :precision="6" />
               </a-form-item>
             </a-col>
           </a-row>
         </template>
         <a-form-item v-if="form.shape === 'circle'" label="半径（米）">
-          <a-input-number v-model:value="form.radius" w-full :min="100" :max="500000" :step="100" />
+          <business-input-number v-model:value="form.radius" w-full :min="100" :max="500000" :step="100" />
         </a-form-item>
         <a-form-item v-else label="多边形顶点">
           <a-textarea v-model:value="form.polygonPoints" :rows="7" placeholder="每行一个顶点：经度,纬度（至少 3 个点）" />
@@ -100,10 +101,10 @@ const form = defineModel<GpsFenceForm>('form', { required: true })
         </a-form-item>
         <a-form-item>
           <a-space>
-            <a-button type="primary" @click="emit('save')">
+            <a-button type="primary" :loading="saving" @click="emit('save')">
               {{ form.id ? '保存修改' : '创建围栏' }}
             </a-button>
-            <a-button @click="emit('reset')">
+            <a-button :disabled="saving" @click="emit('reset')">
               重置
             </a-button>
             <a-switch v-model:checked="form.enabled" checked-children="启用" un-checked-children="停用" />

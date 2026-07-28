@@ -14,7 +14,7 @@ const props = defineProps<{
   scrollX: number
   beforeUploadOrderRecords: (file: File) => boolean | Promise<boolean>
   getRowClassName: (record: Row) => string
-  getStageTag: (record: Row) => { stage: string, fenceName?: string }
+  getStageTag: (record: Row) => { stage: string, label: string, fenceName?: string }
   getStatusColor: (record: Row) => string
   getStatus: (record: Row) => string
   getColumnValue: (record: Row, dataIndex: unknown) => unknown
@@ -34,6 +34,14 @@ const emit = defineEmits<{
 }>()
 
 const isOrder = computed(() => props.moduleName === 'TransportOrders')
+const isEtc = computed(() => props.moduleName === 'TransportEtc')
+const canAdd = computed(() => ['TransportOrders', 'TransportFuel'].includes(props.moduleName))
+
+function getRowKey(record: Row) {
+  if (!isEtc.value)
+    return String(record.code || '')
+  return [record.sourceFileHash, record.summaryNo, record.sourceFileRow, record.code].filter(Boolean).join(':')
+}
 </script>
 
 <template>
@@ -46,22 +54,22 @@ const isOrder = computed(() => props.moduleName === 'TransportOrders')
           </a-button>
         </a-upload>
         <a-button v-else-if="moduleName === 'TransportFuel'" type="primary" @click="emit('importBatch', 'fuel')">
-          批量导入油卡记录
+          导入油卡记录
         </a-button>
         <a-button v-else-if="moduleName === 'TransportEtc'" type="primary" @click="emit('importBatch', 'etc')">
-          批量导入ETC费用发票明细
+          导入ETC费用
         </a-button>
         <a-button @click="emit('export')">
           导出表格
         </a-button>
-        <a-button type="primary" :disabled="!isOrder" @click="emit('add')">
+        <a-button type="primary" :disabled="!canAdd" @click="emit('add')">
           新增
         </a-button>
       </a-space>
     </template>
     <a-table
       :class="{ 'transport-order-table': isOrder, 'transport-etc-table': moduleName === 'TransportEtc' }"
-      row-key="code"
+      :row-key="getRowKey"
       :columns="columns"
       :data-source="rows"
       :pagination="pagination"
@@ -70,7 +78,7 @@ const isOrder = computed(() => props.moduleName === 'TransportOrders')
     >
       <template #bodyCell="{ column, record }">
         <template v-if="column.dataIndex === 'status'">
-          <a-tooltip :title="isOrder ? (getStageTag(record).stage === 'completed' ? '同车辆已有更新录入的运单' : getStageTag(record).fenceName || '未匹配到路线围栏') : ''">
+          <a-tooltip :title="isOrder ? `运输阶段：${getStageTag(record).label}${getStageTag(record).fenceName ? `（${getStageTag(record).fenceName}）` : ''}` : ''">
             <a-tag :color="getStatusColor(record)">
               {{ getStatus(record) }}
             </a-tag>
@@ -111,7 +119,6 @@ const isOrder = computed(() => props.moduleName === 'TransportOrders')
   gap: 2px;
   width: 100%;
   padding: 0;
-  overflow: hidden;
   color: #1677ff;
   text-align: left;
   background: transparent;
@@ -120,9 +127,8 @@ const isOrder = computed(() => props.moduleName === 'TransportOrders')
 }
 .order-location-link span,
 .order-location-link small {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 .order-location-link small,
 .order-location-empty,
@@ -155,13 +161,12 @@ const isOrder = computed(() => props.moduleName === 'TransportOrders')
 }
 .transport-order-table :deep(.ant-table-cell),
 .transport-etc-table :deep(.ant-table-cell) {
-  white-space: nowrap;
-  word-break: keep-all;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 .transport-order-table :deep(.ant-table-tbody > tr > td) {
-  max-width: 220px;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  overflow: visible;
+  text-overflow: clip;
 }
 .transport-order-table :deep(.order-fuel-overrun-row > td) {
   color: #a8071a;
@@ -171,10 +176,17 @@ const isOrder = computed(() => props.moduleName === 'TransportOrders')
   background: #ffd8d4 !important;
 }
 .transport-etc-table :deep(.ant-table) {
-  table-layout: fixed;
+  table-layout: auto;
 }
 .transport-etc-table :deep(.ant-table-tbody > tr > td) {
-  overflow: hidden;
-  text-overflow: ellipsis;
+  overflow: visible;
+  text-overflow: clip;
+}
+.transport-etc-table :deep(.cell-ellipsis) {
+  display: inline;
+  overflow: visible;
+  overflow-wrap: anywhere;
+  text-overflow: clip;
+  white-space: normal;
 }
 </style>

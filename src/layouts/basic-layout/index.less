@@ -19,8 +19,8 @@
     }
 
     &-fixed {
-      width: 1200px;
-      max-width: 1200px;
+      width: min(1200px, 100%);
+      max-width: 100%;
       margin: 0 auto;
 
       &:has(.ant-pro-page-container) {
@@ -43,5 +43,11 @@
     &-content {
       margin: 12px;
     }
+  }
+}
+
+@media (max-width: 480px) {
+  .ant-pro-basicLayout-content {
+    margin: 8px;
   }
 }

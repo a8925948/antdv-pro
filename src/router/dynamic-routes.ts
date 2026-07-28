@@ -85,12 +85,12 @@ export default [
       },
       {
         path: '/oa-approval/org',
-        name: 'OaOrganization',
-        component: () => import('~/pages/approval/oa/organization.vue'),
+        name: 'OaOrganizationLegacyRedirect',
+        redirect: '/system/organization',
         meta: {
           title: '组织架构',
           locale: 'menu.oa-approval.org',
-          oaModule: 'org',
+          hideInMenu: true,
         },
       },
       {
@@ -212,7 +212,7 @@ export default [
       {
         path: '/transport/fuel',
         name: 'TransportFuel',
-        component: () => import('~/pages/transport/module.vue'),
+        component: () => import('~/pages/transport/fuel/index.vue'),
         meta: {
           title: '加油明细',
           locale: 'menu.transport.fuel',
@@ -221,7 +221,7 @@ export default [
       {
         path: '/transport/etc',
         name: 'TransportEtc',
-        component: () => import('~/pages/transport/module.vue'),
+        component: () => import('~/pages/transport/etc/index.vue'),
         meta: {
           title: 'ETC费用',
           locale: 'menu.transport.etc',
@@ -248,7 +248,7 @@ export default [
       {
         path: '/transport/driver-payroll',
         name: 'TransportDriverPayroll',
-        component: () => import('~/pages/transport/module.vue'),
+        component: () => import('~/pages/transport/driver-payroll/index.vue'),
         meta: {
           title: '司机薪酬',
           locale: 'menu.transport.driver-payroll',
@@ -275,7 +275,7 @@ export default [
       {
         path: '/transport/base-data',
         name: 'TransportBaseData',
-        component: () => import('~/pages/transport/module.vue'),
+        component: () => import('~/pages/transport/base-data/index.vue'),
         meta: {
           title: '基础数据',
           locale: 'menu.transport.base-data',

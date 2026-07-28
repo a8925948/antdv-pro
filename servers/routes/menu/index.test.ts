@@ -8,4 +8,13 @@ describe('menu route data', () => {
 
     expect(new Set(ids).size).toBe(ids.length)
   })
+
+  it('routes ETC fees to its server-paginated page', () => {
+    const etcRoute = menuData.find(item => item.name === 'TransportEtc')
+
+    expect(etcRoute).toMatchObject({
+      path: '/transport/etc',
+      component: '/transport/etc',
+    })
+  })
 })

@@ -5,11 +5,11 @@ import { resolveRuntimeJsonDataFile } from './data-paths'
 import { readJsonFile, writeJsonFile } from './json-store'
 import { getMysqlPool, isDatabaseRequired, withMysqlTransaction } from './mysql'
 
-export type TransportOperationRecordType = 'orders' | 'fuels' | 'etc' | 'driverPayrolls' | 'maintenance' | 'inventoryMovements' | 'vehicleLoans' | 'baseCustomers' | 'baseVehicles' | 'baseCrews' | 'baseRoutes'
+export type TransportOperationRecordType = 'orders' | 'fuels' | 'etc' | 'driverPayrolls' | 'maintenance' | 'inventoryMovements' | 'vehicleLoans' | 'baseCompanies' | 'baseCustomers' | 'baseVehicles' | 'baseCrews' | 'baseRoutes'
 
 export type TransportOperationDataset = Record<TransportOperationRecordType, any[]>
 
-const recordTypes: TransportOperationRecordType[] = ['orders', 'fuels', 'etc', 'driverPayrolls', 'maintenance', 'inventoryMovements', 'vehicleLoans', 'baseCustomers', 'baseVehicles', 'baseCrews', 'baseRoutes']
+const recordTypes: TransportOperationRecordType[] = ['orders', 'fuels', 'etc', 'driverPayrolls', 'maintenance', 'inventoryMovements', 'vehicleLoans', 'baseCompanies', 'baseCustomers', 'baseVehicles', 'baseCrews', 'baseRoutes']
 const dataFile = resolveRuntimeJsonDataFile('transport-operation.json')
 let schemaReady: Promise<void> | undefined
 let replacementQueue: Promise<unknown> = Promise.resolve()
@@ -28,8 +28,14 @@ export function getTransportOperationRevision(data: TransportOperationDataset) {
   return createHash('sha256').update(JSON.stringify(data)).digest('hex')
 }
 
+function isOrderDerivedRoute(record: any) {
+  const source = String(record?.source ?? '').trim()
+  return source === '运输订单' || source === '运输订单自动建档'
+}
+
 function normalizeDataset(data: Partial<TransportOperationDataset>): TransportOperationDataset {
   const dataset: TransportOperationDataset = {
+    baseCompanies: Array.isArray(data.baseCompanies) ? data.baseCompanies : [],
     orders: Array.isArray(data.orders) ? data.orders : [],
     fuels: Array.isArray(data.fuels) ? data.fuels : [],
     etc: Array.isArray(data.etc) ? data.etc : [],
@@ -40,12 +46,11 @@ function normalizeDataset(data: Partial<TransportOperationDataset>): TransportOp
     baseCustomers: Array.isArray(data.baseCustomers) ? data.baseCustomers : [],
     baseVehicles: Array.isArray(data.baseVehicles) ? data.baseVehicles : [],
     baseCrews: Array.isArray(data.baseCrews) ? data.baseCrews : [],
-    baseRoutes: Array.isArray(data.baseRoutes) ? data.baseRoutes : [],
+    baseRoutes: Array.isArray(data.baseRoutes) ? data.baseRoutes.filter(record => !isOrderDerivedRoute(record)) : [],
   }
   normalizeDatasetPlateNos(dataset)
   syncCustomersFromOrders(dataset)
   syncVehiclesFromOrders(dataset)
-  syncRoutesFromOrders(dataset)
   return dataset
 }
 
@@ -73,6 +78,8 @@ function normalizeDatasetPlateNos(dataset: TransportOperationDataset) {
       record.code = normalizePlateNo(record.code)
     if (record?.plateNo != null)
       record.plateNo = normalizePlateNo(record.plateNo)
+    if (String(record?.area ?? '').trim() === '格尔木')
+      record.area = '青海'
   })
   dataset.baseCrews.forEach((record) => {
     if (record?.plateNo != null)
@@ -138,42 +145,9 @@ function syncVehiclesFromOrders(dataset: TransportOperationDataset) {
   })
 }
 
-function normalizeRouteIdentity(value: unknown) {
-  return String(value ?? '').trim().replace(/[\s·・,，/至到—–-]+/g, '').toLowerCase()
-}
-
-function nextRouteCode(routes: any[]) {
-  const max = routes.reduce((current, route) => {
-    const match = String(route?.code || '').match(/^LX(\d+)$/)
-    return match ? Math.max(current, Number(match[1])) : current
-  }, 0)
-  return `LX${String(max + 1).padStart(3, '0')}`
-}
-
-function syncRoutesFromOrders(dataset: TransportOperationDataset) {
-  const routeKeys = new Set(dataset.baseRoutes.map(route => normalizeRouteIdentity(route?.name)).filter(Boolean))
-  dataset.orders.forEach((order) => {
-    const name = String(order?.routeLine || '').trim()
-    const key = normalizeRouteIdentity(name)
-    if (!key || routeKeys.has(key))
-      return
-    dataset.baseRoutes.push({
-      code: nextRouteCode(dataset.baseRoutes),
-      customer: String(order?.customer || '').trim(),
-      name,
-      loadingAddress: String(order?.loadingAddress || '').trim(),
-      unloadingAddress: String(order?.unloadingAddress || '').trim(),
-      distance: String(order?.distance || order?.mileage || '').trim(),
-      freightPrice: String(order?.freightPrice || '').trim(),
-      status: '启用',
-      updatedAt: String(order?.shipDate || '').slice(0, 10),
-      source: '运输订单自动建档',
-    })
-    routeKeys.add(key)
-  })
-}
-
 function recordKey(type: TransportOperationRecordType, record: any, index: number) {
+  if (type === 'etc' && record?.sourceFileHash)
+    return `ETC-${String(record.sourceFileHash).slice(0, 32)}-${record.sourceFileRow || index + 1}`
   if (record?.code)
     return String(record.code)
   if (record?.contractNo)
@@ -193,6 +167,18 @@ function assertUniqueRecordKeys(dataset: TransportOperationDataset) {
       keys.add(key)
     })
   }
+
+  const summarySources = new Map<string, string>()
+  dataset.etc.forEach((record) => {
+    const summaryNo = String(record?.summaryNo ?? '').trim()
+    if (!summaryNo)
+      return
+    const source = record?.sourceFileHash ? `file:${String(record.sourceFileHash)}` : 'legacy'
+    const existingSource = summarySources.get(summaryNo)
+    if (existingSource && existingSource !== source)
+      throw new Error(`ETC汇总单号 ${summaryNo} 已存在，禁止重复录入`)
+    summarySources.set(summaryNo, source)
+  })
 }
 
 function parseJson<T>(value: unknown, fallback: T): T {
@@ -545,11 +531,11 @@ async function loadStructuredDataset(db: mysql.Pool) {
   })
   data.inventoryMovements = inventoryMovements.map((row: any) => parseJson(row.record_json, {}))
   data.vehicleLoans = vehicleLoans.map((row: any) => parseJson(row.record_json, {}))
-  const categoryMap: Record<string, TransportOperationRecordType> = { customer: 'baseCustomers', vehicle: 'baseVehicles', crew: 'baseCrews', route: 'baseRoutes' }
+  const categoryMap: Record<string, keyof TransportOperationDataset> = { company: 'baseCompanies', customer: 'baseCustomers', vehicle: 'baseVehicles', crew: 'baseCrews', route: 'baseRoutes' }
   for (const row of baseData as any[]) {
     const type = categoryMap[row.category]
     if (type)
-      data[type].push(parseJson(row.record_json, {}))
+      data[type]!.push(parseJson(row.record_json, {}))
   }
 
   return syncCustomersFromOrders(data)
@@ -576,8 +562,17 @@ function assertNonDestructiveReplacement(current: TransportOperationDataset, nex
     throw new Error(`运输运营数据大幅缩减，需显式确认: ${destructive.join(', ')}`)
 }
 
-const datasetCacheTtlMs = 15_000
+// Reads return the full operational dataset, so keep hot data in-process until a write invalidates it.
+const datasetCacheTtlMs = 5 * 60_000
 let datasetCache: { db: mysql.Pool, expiresAt: number, data: TransportOperationDataset } | undefined
+
+export function invalidateTransportOperationCache() {
+  datasetCache = undefined
+}
+
+export async function ensureTransportOperationSchema(db: mysql.Pool) {
+  await ensureSchema(db)
+}
 
 function readDatasetCache(db: mysql.Pool) {
   if (!datasetCache || datasetCache.db !== db || datasetCache.expiresAt <= Date.now())
@@ -601,6 +596,7 @@ async function persistStructuredDataset(db: mysql.Pool | mysql.PoolConnection, d
   await db.execute('DELETE FROM transport_base_data')
 
   const baseGroups: Array<[string, any[]]> = [
+    ['company', dataset.baseCompanies || []],
     ['customer', dataset.baseCustomers],
     ['vehicle', dataset.baseVehicles],
     ['crew', dataset.baseCrews],
@@ -674,11 +670,12 @@ async function persistStructuredDataset(db: mysql.Pool | mysql.PoolConnection, d
 
   for (const [index, record] of dataset.etc.entries()) {
     const month = parseMonth(record.month, record.updatedAt)
+    const storageKey = recordKey('etc', record, index)
     await db.execute(`
       INSERT INTO transport_etc_record (id, record_json, code, financial_year, financial_month, pass_time, road_section, plate_no, card_no, invoice_no, amount, status, created_at, updated_at, deleted_at)
       VALUES (?, CAST(? AS JSON), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW(), NULL)
       ON DUPLICATE KEY UPDATE record_json = VALUES(record_json), financial_year = VALUES(financial_year), financial_month = VALUES(financial_month), pass_time = VALUES(pass_time), road_section = VALUES(road_section), plate_no = VALUES(plate_no), card_no = VALUES(card_no), invoice_no = VALUES(invoice_no), amount = VALUES(amount), status = VALUES(status), updated_at = NOW(), deleted_at = NULL
-    `, [record.id || record.code || recordKey('etc', record, index), JSON.stringify(record), record.code || recordKey('etc', record, index), month.year, month.month, normalizeDateTime(record.updatedAt) || '1970-01-01 00:00:00', record.name || '', record.plateNo || '', record.cardNo || '', record.invoiceNo || '', toNumber(record.amount), record.status || ''])
+    `, [storageKey, JSON.stringify(record), storageKey, month.year, month.month, normalizeDateTime(record.updatedAt) || '1970-01-01 00:00:00', record.name || '', record.plateNo || '', record.cardNo || '', record.invoiceNo || '', toNumber(record.amount), record.status || ''])
   }
 
   for (const [index, record] of dataset.driverPayrolls.entries()) {

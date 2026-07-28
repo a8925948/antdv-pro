@@ -13,6 +13,7 @@ const props = withDefaults(defineProps<{
   yearCol?: Record<string, number>
   monthCol?: Record<string, number>
   showMonthRange?: boolean
+  showDateRange?: boolean
 }>(), {
   availableMonthKeys: () => [],
   dateCol: () => ({ xs: 24, md: 8, xl: 8 }),
@@ -21,6 +22,7 @@ const props = withDefaults(defineProps<{
   yearCol: () => ({ xs: 24, md: 8, xl: 6 }),
   monthCol: () => ({ xs: 24, md: 8, xl: 6 }),
   showMonthRange: false,
+  showDateRange: true,
 })
 
 const model = defineModel<FinancialPeriodFilterModel>({ required: true })
@@ -118,7 +120,7 @@ function filterSelectOption(input: string, option?: { label?: string | number })
       />
     </a-form-item>
   </a-col>
-  <a-col v-bind="props.dateCol">
+  <a-col v-if="props.showDateRange" v-bind="props.dateCol">
     <a-form-item :label="props.dateLabel">
       <a-range-picker
         :value="pickerDateRange"

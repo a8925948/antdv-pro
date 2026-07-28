@@ -42,6 +42,9 @@ const rowSelection = computed(() => ({
       <a-descriptions-item label="当前状态">
         {{ state.statusText }}
       </a-descriptions-item>
+      <a-descriptions-item v-if="state.summaryNo" label="汇总单号" :span="3">
+        <span class="summary-number">{{ state.summaryNo }}</span>
+      </a-descriptions-item>
       <a-descriptions-item label="总记录数">
         {{ state.totalRecords }}
       </a-descriptions-item>
@@ -123,3 +126,10 @@ const rowSelection = computed(() => ({
     </template>
   </a-modal>
 </template>
+
+<style scoped>
+.summary-number {
+  overflow-wrap: anywhere;
+  font-variant-numeric: tabular-nums;
+}
+</style>

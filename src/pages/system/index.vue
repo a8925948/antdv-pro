@@ -22,8 +22,10 @@ import {
   saveSystemRoleApi,
   saveSystemUserApi,
 } from '~@/api/system'
+import { invalidateBusinessDictionaries } from '~@/composables/business-dictionaries'
 import { createBusinessTableScrollX, displayBusinessTableValue, enhanceBusinessTableColumns, getBusinessTableValue } from '~@/utils/business-table'
 import { buildOrganizationTree, getOrganizationTreeKey } from '~@/utils/organization-tree'
+import { businessDictionaryDefaultKeySet, businessDictionaryTypes } from '../../../shared/business-dictionaries'
 
 type ModalType = 'user' | 'org' | 'role' | 'dict'
 type SystemSection = 'users' | 'org' | 'roles' | 'dicts' | 'logs'
@@ -36,6 +38,8 @@ const loading = ref(false)
 const activeSection = computed<SystemSection>(() => props.section || resolveSystemSection(route.path))
 const userKeyword = ref('')
 const selectedUserOrgKeys = ref<string[]>([])
+const selectedOrganizationKeys = ref<string[]>([])
+const expandedUserOrgKeys = ref<string[]>([])
 const logKeyword = ref('')
 const logAction = ref<string>()
 const dictType = ref<string>()
@@ -48,6 +52,7 @@ const loginLogs = ref<LoginLog[]>([])
 const operationLogs = ref<OperationLog[]>([])
 
 const modalOpen = ref(false)
+const modalSaving = ref(false)
 const modalType = ref<ModalType>('user')
 const formModel = ref<Record<string, any>>({})
 const passwordModalOpen = ref(false)
@@ -102,12 +107,50 @@ const menuPermissionOptions = [
   { label: '系统字典', value: '/system/dictionaries' },
   { label: '安全日志', value: '/system/logs' },
 ]
-const dictionaryTypeOptions = [
+const menuPermissionTree = [
+  { title: '首页', key: '/dashboard/workplace' },
+  { title: 'OA 审批', key: '/oa-approval', children: [
+    { title: '审批中心', key: '/oa-approval/center' },
+    { title: '办公用车', key: '/oa-approval/vehicle' },
+  ] },
+  { title: '运输管理', key: '/transport', children: [
+    { title: '规费管理', key: '/transport/fees' },
+    { title: '车贷费用', key: '/transport/vehicle-loans' },
+  ] },
+  { title: '系统管理', key: '/system', children: [
+    { title: '用户管理', key: '/system/users' },
+    { title: '组织管理', key: '/system/organization' },
+    { title: '角色权限', key: '/system/roles' },
+    { title: '系统字典', key: '/system/dictionaries' },
+    { title: '安全日志', key: '/system/logs' },
+  ] },
+]
+const roleTemplates = [
+  { label: '管理员', value: 'admin', menus: ['*'], buttons: buttonPermissionOptions.map(item => item.value), scope: 'all' },
+  { label: '部门负责人', value: 'manager', menus: ['/dashboard/workplace', '/oa-approval', '/oa-approval/center', '/transport'], buttons: ['view', 'create', 'update', 'approve', 'export'], scope: 'department' },
+  { label: '财务人员', value: 'finance', menus: ['/dashboard/workplace', '/oa-approval', '/oa-approval/center', '/transport', '/transport/fees', '/transport/vehicle-loans'], buttons: ['view', 'create', 'update', 'approve', 'export'], scope: 'company' },
+  { label: '只读用户', value: 'viewer', menus: ['/dashboard/workplace'], buttons: ['view', 'export'], scope: 'self' },
+]
+
+function applyRoleTemplate(value: unknown) {
+  const template = roleTemplates.find(item => item.value === String(value || ''))
+  if (!template)
+    return
+  formModel.value.menuPermissions = [...template.menus]
+  formModel.value.buttonPermissions = [...template.buttons]
+  formModel.value.dataScope = template.scope
+}
+const systemDictionaryTypes = [
   { label: '费用类型', value: 'fee_type' },
   { label: '审批状态', value: 'approval_status' },
   { label: '车辆状态', value: 'vehicle_status' },
   { label: '证照类型', value: 'license_type' },
   { label: '支付方式', value: 'payment_method' },
+]
+const dictionaryTypeOptions = [...systemDictionaryTypes, ...businessDictionaryTypes]
+const dictionaryTypeSelectOptions = [
+  { label: '系统字典', options: systemDictionaryTypes },
+  { label: '业务主数据', options: [...businessDictionaryTypes] },
 ]
 
 const stats = computed(() => [
@@ -120,18 +163,78 @@ const stats = computed(() => [
 
 const companyOptions = computed(() => organizations.value.filter(item => item.type === 'company').map(toSelectOption))
 const deptOptions = computed(() => organizations.value.filter(item => item.type === 'department').map(toSelectOption))
-const deptNameOptions = computed(() => organizations.value
-  .filter(item => item.type === 'department')
-  .map(item => ({ label: item.name, value: item.name })))
 const postOptions = computed(() => organizations.value.filter(item => item.type === 'post').map(toSelectOption))
-const postNameOptions = computed(() => organizations.value
-  .filter(item => item.type === 'post')
-  .map(item => ({ label: item.name, value: item.name })))
+const userPostOptions = computed(() => organizations.value
+  .filter(item => item.type === 'post' && (!formModel.value.deptId || item.parentId === formModel.value.deptId))
+  .map(toSelectOption))
 const roleOptions = computed(() => roles.value.map(item => ({ label: item.name, value: item.id })))
 const roleNameMap = computed(() => new Map(roles.value.map(item => [item.code, item.name])))
 const userOptions = computed(() => users.value.map(item => ({ label: item.nickname, value: item.id })))
+const userOrganizationNodes = computed(() => {
+  const included = new Set<string>()
+  const includeWithParents = (item?: OrganizationNode) => {
+    let current = item
+    while (current) {
+      const key = getOrganizationTreeKey(current)
+      if (included.has(key))
+        break
+      included.add(key)
+      const parentId = current.parentId
+      if (parentId == null) {
+        current = undefined
+        continue
+      }
+      const parentType = current.type === 'post'
+        ? 'department'
+        : organizations.value.some(parent => parent.type === 'department' && String(parent.id) === String(parentId) && String(parent.id) !== String(current?.id))
+          ? 'department'
+          : 'company'
+      current = organizations.value.find(parent => parent.type === parentType && String(parent.id) === String(parentId))
+    }
+  }
+  users.value.forEach((user) => {
+    includeWithParents(organizations.value.find(item => item.type === 'company' && String(item.id) === String(user.companyId)))
+    includeWithParents(organizations.value.find(item => item.type === 'department' && String(item.id) === String(user.deptId)))
+    includeWithParents(organizations.value.find(item =>
+      item.type === 'post'
+      && String(item.id) === String(user.postId)
+      && String(item.parentId) === String(user.deptId),
+    ))
+  })
+  return organizations.value.filter(item => included.has(getOrganizationTreeKey(item)))
+})
 const orgTree = computed(() => buildOrganizationTree(organizations.value, getOrganizationMemberCount))
+const userOrgTree = computed(() => buildOrganizationTree(userOrganizationNodes.value, getOrganizationMemberCount))
 const selectedUserOrg = computed(() => organizations.value.find(item => getOrganizationTreeKey(item) === selectedUserOrgKeys.value[0]))
+function findTreeNode(nodes: ReturnType<typeof buildOrganizationTree>, key?: string): ReturnType<typeof buildOrganizationTree>[number] | undefined {
+  for (const node of nodes) {
+    if (node.key === key)
+      return node
+    const child = findTreeNode(node.children, key)
+    if (child)
+      return child
+  }
+}
+const selectedOrganizationNode = computed(() =>
+  findTreeNode(userOrgTree.value, selectedOrganizationKeys.value[0]) || userOrgTree.value[0],
+)
+const selectedOrganization = computed(() => selectedOrganizationNode.value)
+const selectedOrganizationMembers = computed(() => {
+  const selected = selectedOrganization.value
+  if (!selected)
+    return []
+  if (selected.type === 'company')
+    return users.value.filter(user => String(user.companyId || '') === String(selected.id || ''))
+  if (selected.type === 'department')
+    return getDepartmentMembers(selected)
+  return users.value.filter(user =>
+    String(user.deptId || '') === String(selected.parentId || '')
+    && String(user.postId || '') === String(selected.id || ''),
+  )
+})
+const selectedOrganizationChildren = computed(() => {
+  return selectedOrganizationNode.value?.children || []
+})
 const filteredUsers = computed(() => {
   const keyword = userKeyword.value.trim().toLowerCase()
   const selected = selectedUserOrg.value
@@ -145,35 +248,11 @@ const filteredUsers = computed(() => {
       return String(user.companyId || '') === String(selected.id || '') || user.companyName === selected.name
     if (selected.type === 'department')
       return String(user.deptId || '') === String(selected.id || '') || user.deptName === selected.name
-    return String(user.postId || '') === String(selected.id || '')
-      || (user.postName === selected.name && String(user.deptId || '') === String(selected.parentId || ''))
+    const belongsToPostDepartment = String(user.deptId || '') === String(selected.parentId || '')
+    return belongsToPostDepartment
+      && (String(user.postId || '') === String(selected.id || '') || user.postName === selected.name)
   })
 })
-const orgChartCompany = computed(() => organizations.value.find(item => item.type === 'company') || {
-  id: 'company-main',
-  type: 'company',
-  name: '青海诚捷运输有限公司',
-  code: 'COMP001',
-  leaderName: '超级管理员',
-  sortNo: 1,
-  status: 'enabled',
-})
-const orgChartManagement = computed(() => findOrgByName(['总经办']) || {
-  id: 'management',
-  parentId: orgChartCompany.value.id,
-  type: 'department',
-  name: '总经办',
-  code: 'DEPT001',
-  leaderName: '总经理',
-  sortNo: 10,
-  status: 'enabled',
-})
-const orgChartManagementMembers = computed(() => getDepartmentMembers(orgChartManagement.value))
-const orgChartDepartments = computed(() => [
-  createChartDepartment('人事财务部', ['人事财务部', '财务部'], ['财务会计'], '财务经理'),
-  createChartDepartment('运输管理部', ['运输管理部', '运输部'], ['驾驶员'], '部门负责人'),
-  createChartDepartment('酒店管理部', ['酒店管理部', '综合管理部'], ['酒店岗位'], '超级管理员'),
-])
 
 const userColumns = [
   { title: '姓名', dataIndex: 'nickname', width: 120 },
@@ -263,56 +342,11 @@ function roleLabel(role: string | number) {
   return roleNameMap.value.get(code) || fallbackLabels[code] || code
 }
 
-function findOrgByName(names: string[]) {
-  return organizations.value.find(item => names.includes(item.name))
-}
-
 function getDepartmentMembers(department: Pick<OrganizationNode, 'id' | 'name'>) {
   return users.value.filter(user =>
     String(user.deptId || '') === String(department.id || '')
-    || String(user.deptName || '') === String(department.name || ''),
+    || (!user.deptId && String(user.deptName || '') === String(department.name || '')),
   )
-}
-
-function createChartDepartment(displayName: string, names: string[], postNames: string[], fallbackLeader: string) {
-  const department = findOrgByName(names) || {
-    id: names[0],
-    parentId: orgChartManagement.value.id,
-    type: 'department',
-    name: displayName,
-    code: '-',
-    leaderName: fallbackLeader,
-    sortNo: 0,
-    status: 'enabled',
-  }
-  const posts = organizations.value
-    .filter(item => item.parentId === department.id && item.type === 'post' && postNames.includes(item.name))
-  const displayPosts = posts.length
-    ? posts.map(post => ({ ...post, departmentId: department.id }))
-    : postNames.map((name, index) => ({
-        id: `${department.id}-${index}`,
-        parentId: department.id,
-        departmentId: department.id,
-        type: 'post',
-        name,
-        code: '-',
-        sortNo: index + 1,
-        status: 'enabled',
-      }))
-  const postsWithMembers = displayPosts.map(post => ({
-    ...post,
-    members: users.value.filter(user =>
-      String(user.postId || '') === String(post.id || '')
-      || (String(user.postName || '') === String(post.name || '') && String(user.deptId || '') === String(department.id || '')),
-    ),
-  }))
-  return {
-    ...department,
-    name: displayName,
-    leaderName: department.leaderName || fallbackLeader,
-    members: getDepartmentMembers(department),
-    posts: postsWithMembers,
-  }
 }
 
 function getOrganizationMemberCount(item: OrganizationNode) {
@@ -321,13 +355,44 @@ function getOrganizationMemberCount(item: OrganizationNode) {
   if (item.type === 'department')
     return getDepartmentMembers(item).length
   return users.value.filter(user =>
-    String(user.postId || '') === String(item.id || '')
-    || (user.postName === item.name && String(user.deptId || '') === String(item.parentId || '')),
+    String(user.deptId || '') === String(item.parentId || '')
+    && (String(user.postId || '') === String(item.id || '') || user.postName === item.name),
   ).length
 }
 
 function statusLabel(status: SystemStatus) {
   return status === 'enabled' ? '启用' : '禁用'
+}
+
+function formatDisplayDate(value: unknown) {
+  const text = String(value || '').trim()
+  if (!text)
+    return '-'
+  const date = new Date(text)
+  if (Number.isNaN(date.getTime()))
+    return text
+  const pad = (part: number) => String(part).padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
+}
+
+function maskMobile(value: unknown) {
+  const text = String(value || '')
+  return text.length >= 7 ? `${text.slice(0, 3)}****${text.slice(-4)}` : text || '-'
+}
+
+function maskIp(value: unknown) {
+  const text = String(value || '')
+  if (!text)
+    return '-'
+  if (text.includes(':'))
+    return text.replace(/:[^:]+$/, ':****')
+  const parts = text.split('.')
+  return parts.length === 4 ? `${parts[0]}.${parts[1]}.***.***` : text
+}
+
+function formatUserAgent(value: unknown) {
+  const text = String(value || '')
+  return text ? text.replace(/\s+/g, ' ').slice(0, 80) : '-'
 }
 
 function statusColor(status: SystemStatus) {
@@ -363,6 +428,9 @@ async function loadAll() {
     ])
     users.value = userRes.data || []
     organizations.value = orgRes.data || []
+    expandedUserOrgKeys.value = organizations.value
+      .filter(item => item.type !== 'post')
+      .map(getOrganizationTreeKey)
     roles.value = roleRes.data || []
     dictionaries.value = dictRes.data || []
     loginLogs.value = loginRes.data || []
@@ -509,19 +577,21 @@ function syncLeaderName() {
   formModel.value.leaderName = leader?.nickname
 }
 
-function syncPostByName(value?: unknown) {
-  const postName = String(value ?? formModel.value.postName ?? '').trim()
-  const post = organizations.value.find(item => item.type === 'post' && item.parentId === formModel.value.deptId && item.name === postName)
-  formModel.value.postName = postName
-  formModel.value.postId = post?.id
+function syncUserDepartment(value?: unknown) {
+  const deptId = String(value || '')
+  const department = organizations.value.find(item => item.type === 'department' && String(item.id) === deptId)
+  formModel.value.deptName = String(department?.name || '')
+  const post = organizations.value.find(item => item.type === 'post' && String(item.id) === String(formModel.value.postId) && String(item.parentId) === deptId)
+  if (!post) {
+    formModel.value.postId = undefined
+    formModel.value.postName = ''
+  }
 }
 
-function syncDepartmentByName(value?: unknown) {
-  const deptName = String(value ?? formModel.value.deptName ?? '').trim()
-  const department = organizations.value.find(item => item.type === 'department' && item.name === deptName)
-  formModel.value.deptName = deptName
-  formModel.value.deptId = department?.id
-  syncPostByName()
+function syncUserPost(value?: unknown) {
+  const postId = String(value || '')
+  const post = organizations.value.find(item => item.type === 'post' && String(item.id) === postId && String(item.parentId) === String(formModel.value.deptId))
+  formModel.value.postName = String(post?.name || '')
 }
 
 async function ensureUserDepartment() {
@@ -590,24 +660,74 @@ function syncDictTypeName() {
   formModel.value.typeName = dictionaryTypeOptions.find(item => item.value === formModel.value.type)?.label || ''
 }
 
-async function submitModal() {
+function isProtectedDictionary(record: DictionaryItem) {
+  return businessDictionaryDefaultKeySet.has(`${record.type}::${record.value}`)
+}
+
+function modalValidationError() {
+  const model = formModel.value
   if (modalType.value === 'user') {
-    if (!String(formModel.value.username || '').trim())
-      formModel.value.username = `u${Date.now()}`
-    await ensureUserDepartment()
-    await ensureUserPost()
+    if (!String(model.nickname || '').trim())
+      return '请填写姓名'
+    if (!/^1\d{10}$/.test(String(model.mobile || '').trim()))
+      return '请填写 11 位手机号'
+    if (model.email && !/^[^\s@]+@[^\s@][^\s.@]*\.[^\s@]+$/.test(String(model.email)))
+      return '请填写有效邮箱'
+    if (!model.companyId || !model.deptId || !model.postId)
+      return '请选择公司、部门和岗位'
+    if (!Array.isArray(model.roleIds) || !model.roleIds.length)
+      return '请至少选择一个角色'
+    if (!model.id && String(model.password || '').length < 6)
+      return '初始密码至少 6 位'
   }
-  if (modalType.value === 'user')
-    await saveSystemUserApi(formModel.value)
-  if (modalType.value === 'org')
-    await saveSystemOrganizationApi(formModel.value)
-  if (modalType.value === 'role')
-    await saveSystemRoleApi(formModel.value)
-  if (modalType.value === 'dict')
-    await saveSystemDictionaryApi(formModel.value)
-  message.success('保存成功')
-  modalOpen.value = false
-  await loadAll()
+  if (modalType.value === 'org') {
+    if (!model.type || !String(model.name || '').trim() || !String(model.code || '').trim())
+      return '请填写组织类型、名称和编码'
+    if (model.type !== 'company' && !model.parentId)
+      return '请选择上级组织'
+  }
+  if (modalType.value === 'role' && (!String(model.name || '').trim() || !String(model.code || '').trim()))
+    return '请填写角色名称和编码'
+  if (modalType.value === 'dict' && (!model.type || !String(model.label || '').trim() || !String(model.value || '').trim()))
+    return '请选择数据类型并填写标签、键值'
+  return ''
+}
+
+async function submitModal() {
+  if (modalSaving.value)
+    return
+  const validationError = modalValidationError()
+  if (validationError) {
+    message.warning(validationError)
+    return
+  }
+  modalSaving.value = true
+  try {
+    if (modalType.value === 'user') {
+      if (!String(formModel.value.username || '').trim())
+        formModel.value.username = `u${Date.now()}`
+      await ensureUserDepartment()
+      await ensureUserPost()
+      await saveSystemUserApi(formModel.value)
+    }
+    if (modalType.value === 'org')
+      await saveSystemOrganizationApi(formModel.value)
+    if (modalType.value === 'role')
+      await saveSystemRoleApi(formModel.value)
+    if (modalType.value === 'dict') {
+      await saveSystemDictionaryApi(formModel.value)
+      invalidateBusinessDictionaries()
+    }
+    modalOpen.value = false
+    message.success('保存成功')
+    await loadAll()
+  }
+  catch (error: any) {
+    message.error(error?.message || '保存失败，请检查录入内容')
+  }
+  finally {
+    modalSaving.value = false
+  }
 }
 
 async function removeRecord(type: ModalType, record: any) {
@@ -619,6 +739,8 @@ async function removeRecord(type: ModalType, record: any) {
     await deleteSystemRoleApi(record.id)
   if (type === 'dict')
     await deleteSystemDictionaryApi(record.id)
+  if (type === 'dict')
+    invalidateBusinessDictionaries()
   message.success('删除成功')
   await loadAll()
 }
@@ -684,7 +806,7 @@ async function exportUsers() {
     <div class="system-header">
       <div>
         <h2>系统管理</h2>
-        <p>用户、组织、角色权限、字典和安全日志统一维护</p>
+        <p>用户、组织、角色权限、业务主数据和安全日志统一维护</p>
       </div>
       <a-button :icon="h(ReloadOutlined)" @click="loadAll">
         刷新
@@ -728,9 +850,9 @@ async function exportUsers() {
             </div>
             <a-tree
               v-model:selected-keys="selectedUserOrgKeys"
-              :tree-data="orgTree"
+              v-model:expanded-keys="expandedUserOrgKeys"
+              :tree-data="userOrgTree"
               block-node
-              default-expand-all
             >
               <template #title="node">
                 <span class="user-org-tree-title">
@@ -768,12 +890,24 @@ async function exportUsers() {
                 <template v-else-if="column.dataIndex === 'action'">
                   <a-space>
                     <a @click="openModal('user', record)">编辑</a>
-                    <a @click="toggleUser(record)">{{ record.status === 'enabled' ? '禁用' : '启用' }}</a>
+                    <a-popconfirm
+                      :title="record.status === 'enabled' ? '确认禁用该用户？' : '确认启用该用户？'"
+                      :description="record.status === 'enabled' ? '禁用后该账号将立即无法登录，但历史业务记录会保留。' : '启用后该账号将恢复登录和所属角色权限。'"
+                      @confirm="toggleUser(record)"
+                    >
+                      <a>{{ record.status === 'enabled' ? '禁用' : '启用' }}</a>
+                    </a-popconfirm>
                     <a @click="openPasswordModal(record)">重置密码</a>
-                    <a-popconfirm title="确认删除该用户？" ok-type="danger" @confirm="removeRecord('user', record)">
+                    <a-popconfirm title="确认删除该用户？" description="删除后账号无法恢复，历史业务记录仍保留操作人名称。" ok-type="danger" @confirm="removeRecord('user', record)">
                       <a class="danger-link">删除</a>
                     </a-popconfirm>
                   </a-space>
+                </template>
+                <template v-else-if="column.dataIndex === 'mobile'">
+                  {{ maskMobile(record.mobile) }}
+                </template>
+                <template v-else-if="column.dataIndex === 'lastLoginAt'">
+                  {{ formatDisplayDate(record.lastLoginAt) }}
                 </template>
                 <template v-else>
                   <a-tooltip :title="displayBusinessTableValue(getBusinessTableValue(record, column.dataIndex))">
@@ -794,79 +928,107 @@ async function exportUsers() {
             新增组织
           </a-button>
         </a-space>
-        <div class="org-chart">
-          <div class="org-chart-level">
-            <div class="org-chart-node org-chart-node--company">
-              <strong>{{ orgChartCompany.name }}</strong>
-              <span>{{ orgTypeLabel(orgChartCompany.type) }} / {{ orgChartCompany.code }}</span>
-              <em>负责人：{{ orgChartCompany.leaderName || '-' }}</em>
-              <a-space class="org-chart-actions">
-                <a @click="openModal('org', orgChartCompany)">编辑</a>
-              </a-space>
+        <div class="organization-sync-layout">
+          <aside class="user-org-panel" aria-label="组织架构">
+            <div class="user-org-panel__header">
+              <div>
+                <strong>组织树</strong>
+                <span>与用户管理实时同步</span>
+              </div>
             </div>
-          </div>
+            <a-tree
+              v-model:selected-keys="selectedOrganizationKeys"
+              v-model:expanded-keys="expandedUserOrgKeys"
+              :tree-data="userOrgTree"
+              block-node
+            >
+              <template #title="node">
+                <span class="user-org-tree-title">
+                  <span>{{ node.title }}</span>
+                  <span class="user-org-tree-count">{{ node.memberCount }}</span>
+                </span>
+              </template>
+            </a-tree>
+          </aside>
 
-          <div class="org-chart-line" />
+          <section v-if="selectedOrganization" class="organization-detail">
+            <header class="organization-detail__header">
+              <div>
+                <h3>{{ selectedOrganization.name }}</h3>
+                <p>{{ orgTypeLabel(selectedOrganization.type) }} / {{ selectedOrganization.code }} / {{ selectedOrganizationMembers.length }} 人</p>
+              </div>
+              <a-space>
+                <a-button @click="openModal('org', selectedOrganization)">
+                  编辑
+                </a-button>
+                <a-button
+                  v-if="selectedOrganization.type !== 'company'"
+                  type="primary"
+                  @click="selectedOrganization.type === 'post' ? openAddPostMember(selectedOrganization) : openAddMember(selectedOrganization)"
+                >
+                  添加成员
+                </a-button>
+              </a-space>
+            </header>
 
-          <div class="org-chart-level">
-            <div class="org-chart-node org-chart-node--management">
-              <strong>{{ orgChartManagement.name }}</strong>
-              <span>{{ orgTypeLabel(orgChartManagement.type) }} / {{ orgChartManagement.code }}</span>
-              <em>负责人：{{ orgChartManagement.leaderName || '-' }}</em>
-              <div class="org-member-list">
-                <a-tag v-for="member in orgChartManagementMembers" :key="member.id" :color="member.status === 'enabled' ? 'blue' : undefined">
-                  {{ member.nickname }}<template v-if="member.postName">
-                    （{{ member.postName }}）
-                  </template>
+            <a-descriptions :column="2" bordered size="small">
+              <a-descriptions-item label="类型">
+                {{ orgTypeLabel(selectedOrganization.type) }}
+              </a-descriptions-item>
+              <a-descriptions-item label="状态">
+                <a-tag :color="statusColor(selectedOrganization.status)">
+                  {{ statusLabel(selectedOrganization.status) }}
                 </a-tag>
-                <span v-if="!orgChartManagementMembers.length">暂无人员</span>
-              </div>
-              <a-space class="org-chart-actions">
-                <a @click="openAddMember(orgChartManagement as OrganizationNode)">添加成员</a>
-                <a @click="openModal('org', orgChartManagement)">编辑</a>
-              </a-space>
-            </div>
-          </div>
+              </a-descriptions-item>
+              <a-descriptions-item label="负责人">
+                {{ selectedOrganization.leaderName || '-' }}
+              </a-descriptions-item>
+              <a-descriptions-item label="下级节点">
+                {{ selectedOrganizationChildren.length }}
+              </a-descriptions-item>
+            </a-descriptions>
 
-          <div class="org-chart-branch-line" />
-
-          <div class="org-chart-departments">
-            <div v-for="department in orgChartDepartments" :key="department.id" class="org-chart-column">
-              <div class="org-chart-node">
-                <strong>{{ department.name }}</strong>
-                <span>{{ orgTypeLabel(department.type) }} / {{ department.code }}</span>
-                <em>负责人：{{ department.leaderName || '-' }}</em>
-                <div class="org-member-list">
-                  <a-tag v-for="member in department.members" :key="member.id" :color="member.status === 'enabled' ? 'blue' : undefined">
-                    {{ member.nickname }}<template v-if="member.postName">
-                      （{{ member.postName }}）
-                    </template>
-                  </a-tag>
-                  <span v-if="!department.members.length">暂无人员</span>
-                </div>
-                <a-space class="org-chart-actions">
-                  <a @click="openAddMember(department as OrganizationNode)">添加成员</a>
-                  <a @click="openModal('org', department)">编辑</a>
-                </a-space>
+            <div class="organization-detail__section">
+              <h4>下级组织</h4>
+              <div v-if="selectedOrganizationChildren.length" class="organization-child-list">
+                <button
+                  v-for="child in selectedOrganizationChildren"
+                  :key="getOrganizationTreeKey(child)"
+                  type="button"
+                  class="organization-child-item"
+                  @click="selectedOrganizationKeys = [getOrganizationTreeKey(child)]"
+                >
+                  <strong>{{ child.name }}</strong>
+                  <span>{{ orgTypeLabel(child.type) }} / {{ getOrganizationMemberCount(child) }} 人</span>
+                </button>
               </div>
-              <div class="org-chart-post-line" />
-              <div v-for="post in department.posts" :key="post.id" class="org-chart-node org-chart-node--post">
-                <strong>{{ post.name }}</strong>
-                <span>{{ orgTypeLabel(post.type) }} / {{ post.code }}</span>
-                <em>岗位/成员</em>
-                <div class="org-member-list">
-                  <a-tag v-for="member in post.members" :key="member.id" color="blue">
-                    {{ member.nickname }}
-                  </a-tag>
-                  <span v-if="!post.members.length">暂无成员</span>
-                </div>
-                <a-space class="org-chart-actions">
-                  <a @click="openAddPostMember(post)">添加成员</a>
-                  <a v-if="post.code !== '-'" @click="openModal('org', post)">编辑</a>
-                </a-space>
-              </div>
+              <a-empty v-else description="暂无下级组织" :image-style="{ height: '48px' }" />
             </div>
-          </div>
+
+            <div class="organization-detail__section">
+              <h4>成员</h4>
+              <a-table
+                :columns="userTableColumns.filter(column => !['mobile', 'wecomUserId', 'lastLoginAt', 'action'].includes(String(column.dataIndex)))"
+                :data-source="selectedOrganizationMembers"
+                row-key="id"
+                size="small"
+                :pagination="false"
+              >
+                <template #bodyCell="{ column, record }">
+                  <template v-if="column.dataIndex === 'roles'">
+                    <a-tag v-for="role in record.roles" :key="role" color="blue">
+                      {{ roleLabel(role) }}
+                    </a-tag>
+                  </template>
+                  <template v-else-if="column.dataIndex === 'status'">
+                    <a-tag :color="statusColor(record.status)">
+                      {{ statusLabel(record.status) }}
+                    </a-tag>
+                  </template>
+                </template>
+              </a-table>
+            </div>
+          </section>
         </div>
       </a-card>
 
@@ -919,9 +1081,9 @@ async function exportUsers() {
         </a-table>
       </a-card>
 
-      <a-card v-if="activeSection === 'dicts'" title="系统字典" :bordered="false" class="system-section-card">
+      <a-card v-if="activeSection === 'dicts'" title="字典与业务主数据" :bordered="false" class="system-section-card">
         <a-space class="toolbar" wrap>
-          <a-select v-model:value="dictType" allow-clear placeholder="字典类型" style="width: 180px" :options="dictionaryTypeOptions" @change="queryDicts" />
+          <a-select v-model:value="dictType" allow-clear placeholder="选择数据类型" style="width: 220px" :options="dictionaryTypeSelectOptions" @change="queryDicts" />
           <a-button type="primary" :icon="h(PlusOutlined)" @click="openModal('dict')">
             新增字典
           </a-button>
@@ -936,7 +1098,7 @@ async function exportUsers() {
             <template v-else-if="column.dataIndex === 'action'">
               <a-space>
                 <a @click="openModal('dict', record)">编辑</a>
-                <a-popconfirm title="确认删除该字典项？" ok-type="danger" @confirm="removeRecord('dict', record)">
+                <a-popconfirm v-if="!isProtectedDictionary(record as DictionaryItem)" title="确认删除该字典项？" ok-type="danger" @confirm="removeRecord('dict', record)">
                   <a class="danger-link">删除</a>
                 </a-popconfirm>
               </a-space>
@@ -996,6 +1158,15 @@ async function exportUsers() {
                     {{ record.status === 'success' ? '成功' : record.status === 'logout' ? '退出' : '失败' }}
                   </a-tag>
                 </template>
+                <template v-else-if="column.dataIndex === 'ip'">
+                  {{ maskIp(record.ip) }}
+                </template>
+                <template v-else-if="column.dataIndex === 'userAgent'">
+                  {{ formatUserAgent(record.userAgent) }}
+                </template>
+                <template v-else-if="column.dataIndex === 'createdAt'">
+                  {{ formatDisplayDate(record.createdAt) }}
+                </template>
                 <template v-else>
                   <a-tooltip :title="displayBusinessTableValue(getBusinessTableValue(record, column.dataIndex))">
                     <span class="cell-ellipsis">
@@ -1010,7 +1181,7 @@ async function exportUsers() {
       </a-card>
     </div>
 
-    <a-modal v-model:open="modalOpen" :title="modalTitle" width="720px" :mask-closable="false" ok-text="保存" cancel-text="取消" @ok="submitModal">
+    <a-modal v-model:open="modalOpen" :title="modalTitle" width="720px" :mask-closable="false" :closable="!modalSaving" :keyboard="!modalSaving" :confirm-loading="modalSaving" :cancel-button-props="{ disabled: modalSaving }" ok-text="保存" cancel-text="取消" @ok="submitModal">
       <a-form :model="formModel" layout="vertical">
         <template v-if="modalType === 'user'">
           <a-row :gutter="12">
@@ -1045,26 +1216,24 @@ async function exportUsers() {
               </a-form-item>
             </a-col>
             <a-col :xs="24" :md="12">
-              <a-form-item label="部门">
-                <a-auto-complete
-                  v-model:value="formModel.deptName"
-                  :options="deptNameOptions"
+              <a-form-item label="部门" required>
+                <a-select
+                  v-model:value="formModel.deptId"
+                  :options="deptOptions"
                   allow-clear
-                  placeholder="请选择或输入部门"
-                  @select="syncDepartmentByName"
-                  @change="syncDepartmentByName"
+                  placeholder="请从组织架构选择部门"
+                  @change="syncUserDepartment"
                 />
               </a-form-item>
             </a-col>
             <a-col :xs="24" :md="12">
               <a-form-item label="岗位">
-                <a-auto-complete
-                  v-model:value="formModel.postName"
-                  :options="postNameOptions"
+                <a-select
+                  v-model:value="formModel.postId"
+                  :options="userPostOptions"
                   allow-clear
-                  placeholder="请选择或输入岗位"
-                  @select="syncPostByName"
-                  @change="syncPostByName"
+                  placeholder="请选择所属部门的岗位"
+                  @change="syncUserPost"
                 />
               </a-form-item>
             </a-col>
@@ -1120,7 +1289,7 @@ async function exportUsers() {
             </a-col>
             <a-col :xs="24" :md="12">
               <a-form-item label="排序">
-                <a-input-number v-model:value="formModel.sortNo" style="width: 100%" />
+                <business-input-number v-model:value="formModel.sortNo" style="width: 100%" />
               </a-form-item>
             </a-col>
             <a-col :span="24">
@@ -1138,6 +1307,11 @@ async function exportUsers() {
 
         <template v-else-if="modalType === 'role'">
           <a-row :gutter="12">
+            <a-col :span="24">
+              <a-form-item label="角色模板" extra="选择模板后仍可继续调整权限">
+                <a-select allow-clear placeholder="请选择角色模板" :options="roleTemplates" @change="applyRoleTemplate" />
+              </a-form-item>
+            </a-col>
             <a-col :xs="24" :md="12">
               <a-form-item label="角色名称" required>
                 <a-input v-model:value="formModel.name" />
@@ -1150,7 +1324,7 @@ async function exportUsers() {
             </a-col>
             <a-col :span="24">
               <a-form-item label="菜单权限">
-                <a-select v-model:value="formModel.menuPermissions" mode="multiple" :options="menuPermissionOptions" />
+                <a-tree v-model:checked-keys="formModel.menuPermissions" checkable default-expand-all :tree-data="menuPermissionTree" />
               </a-form-item>
             </a-col>
             <a-col :span="24">
@@ -1180,7 +1354,7 @@ async function exportUsers() {
           <a-row :gutter="12">
             <a-col :xs="24" :md="12">
               <a-form-item label="字典类型">
-                <a-select v-model:value="formModel.type" :options="dictionaryTypeOptions" @change="syncDictTypeName" />
+                <a-select v-model:value="formModel.type" :options="dictionaryTypeSelectOptions" @change="syncDictTypeName" />
               </a-form-item>
             </a-col>
             <a-col :xs="24" :md="12">
@@ -1200,7 +1374,7 @@ async function exportUsers() {
             </a-col>
             <a-col :xs="24" :md="12">
               <a-form-item label="排序">
-                <a-input-number v-model:value="formModel.sortNo" style="width: 100%" />
+                <business-input-number v-model:value="formModel.sortNo" style="width: 100%" />
               </a-form-item>
             </a-col>
             <a-col :xs="24" :md="12">
@@ -1224,6 +1398,9 @@ async function exportUsers() {
       width="440px"
       :mask-closable="false"
       :confirm-loading="passwordSubmitting"
+      :closable="!passwordSubmitting"
+      :keyboard="!passwordSubmitting"
+      :cancel-button-props="{ disabled: passwordSubmitting }"
       :ok-button-props="{ disabled: !passwordFormValid }"
       ok-text="确认修改"
       cancel-text="取消"
@@ -1423,117 +1600,80 @@ async function exportUsers() {
   background: #f8fafc;
 }
 
-.org-chart {
-  overflow-x: auto;
-  padding: 8px 0 4px;
-}
-
-.org-chart-level {
-  display: flex;
-  justify-content: center;
-}
-
-.org-chart-node {
+.organization-sync-layout {
   display: grid;
-  min-width: 220px;
-  max-width: 280px;
-  gap: 4px;
-  padding: 14px 16px;
-  border: 1px solid #dbe4f0;
-  border-radius: 8px;
-  background: #fff;
-  box-shadow: 0 4px 8px rgb(15 23 42 / 4%);
-  text-align: center;
+  grid-template-columns: minmax(240px, 300px) minmax(0, 1fr);
+  min-height: 560px;
+  border: 1px solid var(--admin-border-subtle);
+  border-radius: var(--admin-radius);
+  overflow: hidden;
 }
 
-.org-chart-node strong {
+.organization-sync-layout .user-org-panel {
+  max-height: none;
+  overflow: auto;
+}
+
+.organization-detail {
+  min-width: 0;
+  padding: 20px;
+}
+
+.organization-detail__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 18px;
+}
+
+.organization-detail__header h3,
+.organization-detail__section h4 {
+  margin: 0;
   color: var(--admin-text);
-  font-size: 16px;
-  font-weight: 700;
 }
 
-.org-chart-node span,
-.org-chart-node em {
+.organization-detail__header p {
+  margin: 4px 0 0;
   color: var(--admin-muted);
-  font-size: 12px;
-  font-style: normal;
+  font-size: 13px;
 }
 
-.org-chart-node--company {
-  min-width: 320px;
-  border-color: #93c5fd;
+.organization-detail__section {
+  margin-top: 20px;
+}
+
+.organization-detail__section h4 {
+  margin-bottom: 10px;
+  font-size: 14px;
+}
+
+.organization-child-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 10px;
+}
+
+.organization-child-item {
+  display: grid;
+  gap: 4px;
+  padding: 12px 14px;
+  border: 1px solid var(--admin-border-subtle);
+  border-radius: 6px;
+  background: #fff;
+  color: var(--admin-text);
+  cursor: pointer;
+  text-align: left;
+}
+
+.organization-child-item:hover {
+  border-color: #60a5fa;
   background: #eff6ff;
 }
 
-.org-chart-node--management {
-  min-width: 300px;
-  border-color: #bfdbfe;
-}
-
-.org-chart-node--post {
-  min-width: 180px;
-  background: #f8fafc;
-}
-
-.org-chart-actions {
-  justify-content: center;
-  margin-top: 4px;
-}
-
-.org-member-list {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: center;
-  min-height: 24px;
-  gap: 4px;
-  margin-top: 4px;
-}
-
-.org-member-list span {
+.organization-child-item span {
   color: var(--admin-muted);
   font-size: 12px;
-}
-
-.org-member-list :deep(.ant-tag) {
-  margin-inline-end: 0;
-}
-
-.org-chart-line,
-.org-chart-post-line {
-  width: 1px;
-  height: 24px;
-  margin: 0 auto;
-  background: #94a3b8;
-}
-
-.org-chart-branch-line {
-  position: relative;
-  width: min(720px, 76%);
-  height: 32px;
-  margin: 0 auto;
-  border-top: 1px solid #94a3b8;
-}
-
-.org-chart-branch-line::before {
-  position: absolute;
-  top: -1px;
-  left: 50%;
-  width: 1px;
-  height: 32px;
-  background: #94a3b8;
-  content: '';
-}
-
-.org-chart-departments {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(220px, 1fr));
-  gap: 24px;
-  min-width: 780px;
-}
-
-.org-chart-column {
-  display: grid;
-  justify-items: center;
 }
 
 .toolbar {
@@ -1559,6 +1699,23 @@ async function exportUsers() {
 
   .user-org-layout {
     grid-template-columns: 1fr;
+  }
+
+  .organization-sync-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .organization-detail {
+    padding: 14px;
+  }
+
+  .organization-detail__header {
+    flex-direction: column;
+  }
+
+  .organization-sync-layout .user-org-panel {
+    border-right: 0;
+    border-bottom: 1px solid var(--admin-border-subtle);
   }
 
   .user-org-panel {

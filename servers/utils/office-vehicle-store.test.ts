@@ -45,6 +45,41 @@ describe('office vehicle store', () => {
     await expect(officeVehicleStore.deleteVehicle(created.id, admin)).resolves.toMatchObject({ deletedAt: expect.any(String) })
   })
 
+  it('saves one vehicle with multiple related records in one persistence operation', async () => {
+    const plateNo = `BATCH-${Date.now()}`
+    const result = await officeVehicleStore.saveBatch({
+      vehicle: { plateNo, brandModel: '批量录入测试车', ownerName: '管理员' },
+      expenses: [
+        { expenseType: '停车费', amount: 20, occurredDate: '2026-07-20' },
+        { expenseType: '洗车费', amount: 50, occurredDate: '2026-07-21' },
+      ],
+      licenses: [{ licenseType: '行驶证', licenseNo: `L-${Date.now()}`, expiryDate: '2028-07-20' }],
+      insurances: [{ insuranceType: '交强险', policyNo: `P-${Date.now()}`, insurer: '测试保险', amount: 950, startDate: '2026-07-20', endDate: '2027-07-19' }],
+      reminders: [{ reminderType: '车辆保养时间', dueDate: '2026-12-20', remindDays: 15 }],
+    }, admin)
+
+    expect(result.vehicle).toMatchObject({ plateNo, brandModel: '批量录入测试车' })
+    expect(result.expenses).toHaveLength(2)
+    expect(result.licenses).toHaveLength(1)
+    expect(result.insurances).toHaveLength(1)
+    expect(result.reminders).toHaveLength(1)
+    expect(mocks.writeFileSync).toHaveBeenCalledTimes(1)
+  })
+
+  it('rolls back the whole vehicle batch when a related record is invalid', async () => {
+    const plateNo = `ROLLBACK-${Date.now()}`
+    await expect(officeVehicleStore.saveBatch({
+      vehicle: { plateNo, brandModel: '不应保留的车辆' },
+      expenses: [
+        { expenseType: '停车费', amount: 20, occurredDate: '2026-07-20' },
+        { expenseType: '洗车费', amount: -1, occurredDate: '2026-07-21' },
+      ],
+    }, admin)).rejects.toThrow('费用第 2 条：费用金额必须为有效的非负数')
+
+    expect((await officeVehicleStore.listVehicles({ ...admin, plateNo })).records).toHaveLength(0)
+    expect(mocks.writeFileSync).not.toHaveBeenCalled()
+  })
+
   it('idempotently brings regulatory fee vehicles into office vehicle records', async () => {
     const plateNo = `GF-${Date.now()}`
     const [first, second] = await Promise.all([
@@ -105,7 +140,12 @@ describe('office vehicle store', () => {
     const base = { vehicleId: 'veh1', insuranceType: '商业险', policyNo: 'P1', insurer: '保险公司', startDate: '2026-07-01', endDate: '2027-07-01' }
     await expect(officeVehicleStore.saveInsurance({ ...base, amount: Number.NaN }, admin)).rejects.toThrow('保险金额必须为有效的非负数')
     await expect(officeVehicleStore.saveInsurance({ ...base, startDate: '2027-07-02', endDate: '2027-07-01' }, admin)).rejects.toThrow('结束日期不能早于开始日期')
-    await expect(officeVehicleStore.saveInsurance({ ...base, policyNo: `P-${Date.now()}`, amount: 1000 }, admin)).resolves.toMatchObject({ amount: 1000, plateNo: '沪A·8899' })
+    await expect(officeVehicleStore.saveInsurance({ ...base, policyNo: `P-${Date.now()}`, amount: 1000, attachmentName: '保单.pdf', attachmentUrl: '/uploads/2026/07/policy.pdf' }, admin)).resolves.toMatchObject({
+      amount: 1000,
+      plateNo: '沪A·8899',
+      attachmentName: '保单.pdf',
+      attachmentUrl: '/uploads/2026/07/policy.pdf',
+    })
   })
 
   it('restricts reminder handling to finance or vehicle administrators', async () => {

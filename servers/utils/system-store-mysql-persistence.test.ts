@@ -37,6 +37,18 @@ describe('system store MySQL persistence', () => {
           status: 'enabled',
         }]]
       }
+      if (sql.includes('FROM sys_dict')) {
+        return [[{
+          id: 1,
+          type: 'fee_type',
+          type_name: 'è´¹ç”¨ç±»åž‹',
+          label: 'ä¿é™©è´¹',
+          value: 'insurance',
+          sort_no: 1,
+          status: 'enabled',
+          remark: null,
+        }]]
+      }
       return [[]]
     })
     mocks.execute.mockImplementation(async (sql: string) => {
@@ -57,7 +69,15 @@ describe('system store MySQL persistence', () => {
     })
 
     expect(user.id).toBe(42)
+    expect(mocks.execute.mock.calls.some(([sql]) => String(sql).includes('INSERT IGNORE INTO sys_dict'))).toBe(true)
     expect(mocks.execute.mock.calls.some(([sql]) => String(sql).includes('INSERT INTO sys_user ('))).toBe(true)
     expect(mocks.execute.mock.calls.some(([sql]) => String(sql).includes('UPDATE sys_user'))).toBe(false)
+  })
+
+  it('repairs legacy mojibake dictionary fields read from MySQL', async () => {
+    const { systemStore } = await import('./system-store')
+    await expect(systemStore.listDictionaries({ type: 'fee_type' })).resolves.toEqual([
+      expect.objectContaining({ typeName: '费用类型', label: '保险费' }),
+    ])
   })
 })

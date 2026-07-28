@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { billReconciliationStore } from './bill-reconciliation-store'
 import { hotelDailyStore } from './hotel-daily-store'
 import { hotelRevenueStore } from './hotel-revenue-store'
-import { tradeOrderStore } from './trade-order-store'
+import { buildTradeOrderAnalytics, tradeOrderStore } from './trade-order-store'
 
 const mocks = vi.hoisted(() => ({
   pool: undefined as any,
@@ -26,7 +26,7 @@ describe('small business stores', () => {
   })
 
   it('normalizes and filters local hotel revenue records by date', async () => {
-    mocks.readJsonFile.mockReturnValue([{ id: '1', date: '2026-01-01' }, { id: '2', date: '2026-01-02' }, { id: '', date: '2026-01-01' }, null])
+    mocks.readJsonFile.mockReturnValue([{ id: '1', date: '2026-01-01', roomOrOrderNo: '301', roomType: '标准间', channel: '携程' }, { id: '2', date: '2026-01-02' }, { id: '', date: '2026-01-01' }, null])
     await expect(hotelRevenueStore.list('2026-01-01')).resolves.toEqual([{ id: '1', date: '2026-01-01' }])
   })
 
@@ -76,6 +76,61 @@ describe('small business stores', () => {
     await expect(tradeOrderStore.applyChanges({ upsert: [{ code: 'new' }], deleteCodes: ['drop'] })).resolves.toEqual([{ code: 'keep' }, { code: 'new' }])
   })
 
+  it('enforces trade order transitions and locks settled orders in the store', async () => {
+    mocks.readJsonFile.mockReturnValue([{ code: 'A', status: '待确认' }])
+    await expect(tradeOrderStore.applyChanges({ upsert: [{ code: 'A', status: '已结算' }] })).rejects.toThrow('只能从“待确认”流转到“已确认”')
+
+    mocks.readJsonFile.mockReturnValue([{ code: 'B', status: '已结算' }])
+    await expect(tradeOrderStore.applyChanges({ deleteCodes: ['B'] })).rejects.toThrow('已结算订单已锁定')
+    await expect(tradeOrderStore.applyChanges({ upsert: [{ code: 'B', status: '已结算', carrier: '更正' }] })).rejects.toThrow('已结算订单已锁定')
+
+    mocks.readJsonFile.mockReturnValue([{ code: 'C', status: '已结算' }])
+    await expect(tradeOrderStore.replace([])).rejects.toThrow('已结算订单已锁定')
+
+    mocks.readJsonFile.mockReturnValue([{ code: 'C', status: '已结算' }])
+    await expect(tradeOrderStore.replace([{ code: 'C', status: '已结算' }])).resolves.toEqual([{ code: 'C', status: '已结算' }])
+  })
+
+  it('filters, summarizes and paginates local trade orders by financial period', async () => {
+    mocks.readJsonFile.mockReturnValue([
+      { code: 'A', loadingDate: '2026-06-26', carrier: '诚捷', plateNo: '青A001', status: '待确认', loadingTon: 10, unloadingTon: 9, payableTotal: 100, receivableLiquidTotal: 150, profit: 30 },
+      { code: 'B', loadingDate: '2026-07-25', carrier: '诚捷', plateNo: '青A001', status: '已结算', loadingTon: 20, unloadingTon: 19, payableTotal: 200, receivableLiquidTotal: 280, profit: 50 },
+      { code: 'C', loadingDate: '2026-07-26', carrier: '外协', plateNo: '青A002', status: '待确认', loadingTon: 30, unloadingTon: 29, payableTotal: 300, receivableLiquidTotal: 390, profit: 60 },
+    ])
+
+    await expect(tradeOrderStore.listPage(1, 10, { year: 2026, month: 7, plateNo: '青A001', sortField: 'profit', sortOrder: 'ascend' })).resolves.toEqual(expect.objectContaining({
+      records: [expect.objectContaining({ code: 'A' }), expect.objectContaining({ code: 'B' })],
+      total: 2,
+      summary: expect.objectContaining({ count: 2, loadingTon: 30, payableTotal: 300, profit: 80 }),
+      facets: {
+        years: ['2026'],
+        statuses: ['已结算', '待确认'],
+        plateNos: ['青A001', '青A002'],
+      },
+    }))
+
+    await expect(tradeOrderStore.listFiltered({ keyword: '外协', sortField: 'loadingDate', sortOrder: 'descend' })).resolves.toEqual([
+      expect.objectContaining({ code: 'C' }),
+    ])
+  })
+
+  it('builds complete trade analytics by status, financial month and customer', () => {
+    const result = buildTradeOrderAnalytics([
+      { code: 'A', loadingDate: '2026-06-26', status: '待确认', receiver: '客户甲', receivableLiquidTotal: 150, payableTotal: 80, freightTotal: 20, cargoLoss: 5, profit: 45 },
+      { code: 'B', loadingDate: '2026-07-25', status: '已结算', receiver: '客户甲', receivableLiquidTotal: 280, payableTotal: 180, freightTotal: 30, cargoLoss: 10, profit: 60 },
+      { code: 'C', loadingDate: '2026-07-26', status: '待确认', receiver: '客户乙', receivableLiquidTotal: 390, payableTotal: 260, freightTotal: 40, cargoLoss: 10, profit: 80 },
+    ])
+    expect(result.statuses).toEqual([
+      { status: '待确认', count: 2, receivable: 540, profit: 125 },
+      { status: '已结算', count: 1, receivable: 280, profit: 60 },
+    ])
+    expect(result.months).toEqual([
+      { month: '2026-07', receivable: 430, payable: 325, profit: 105 },
+      { month: '2026-08', receivable: 390, payable: 310, profit: 80 },
+    ])
+    expect(result.customers[0]).toEqual({ name: '客户甲', count: 2, receivable: 430, profit: 105 })
+  })
+
   it('upserts a local reconciliation archive at the front', async () => {
     mocks.readJsonFile.mockReturnValue([{ id: 'A', value: 1 }, { id: 'B' }])
     await expect(billReconciliationStore.save({ id: 'A', value: 2 })).resolves.toEqual([{ id: 'A', value: 2 }, { id: 'B' }])
@@ -107,10 +162,42 @@ describe('small business stores', () => {
   it('soft-deletes and upserts normalized trade rows in MySQL', async () => {
     const execute = vi.fn().mockResolvedValue([{}])
     mocks.pool = { query: vi.fn().mockResolvedValue([[]]), execute }
-    await expect(tradeOrderStore.replace([{ code: 'A', amount: 10 }, {}])).resolves.toEqual([{ code: 'A', amount: 10 }])
+    const row = { code: 'A', status: '待确认', loadingDate: '2026-07-19', payableTotal: 10 }
+    await expect(tradeOrderStore.replace([row, {}])).resolves.toEqual([row])
     expect(execute).toHaveBeenCalledTimes(2)
     expect(execute.mock.calls[0][0]).toContain('UPDATE trade_order SET deleted_at')
-    expect(execute.mock.calls[1][1]).toEqual(['A', JSON.stringify({ code: 'A', amount: 10 })])
+    expect(execute.mock.calls[1][0]).toContain('status = VALUES(status)')
+    expect(execute.mock.calls[1][0]).toContain('loading_date = VALUES(loading_date)')
+    expect(execute.mock.calls[1][0]).toContain('amount = VALUES(amount)')
+    expect(execute.mock.calls[1][1]).toEqual(['A', JSON.stringify(row), '待确认', '2026-07-19', 10])
+  })
+
+  it('binds filtered trade pagination and returns summary facets in MySQL', async () => {
+    const query = vi.fn(async (sql: string) => {
+      if (sql.includes('COUNT(*) AS total'))
+        return [[{ total: 1 }]]
+      if (sql.includes('SELECT order_json') && sql.includes('LIMIT'))
+        return [[{ order_json: { code: 'A', plateNo: '青A001' } }]]
+      if (sql.includes('COALESCE(SUM'))
+        return [[{ count: 1, loadingTon: 10, unloadingTon: 9, payableTotal: 100, receivableTotal: 150, profit: 30 }]]
+      if (sql.includes('SELECT DISTINCT status'))
+        return [[{ status: '待确认', plateNo: '青A001', financialYear: 2026 }]]
+      return [[]]
+    })
+    mocks.pool = { query, execute: vi.fn() }
+
+    await expect(tradeOrderStore.listPage(2, 20, { keyword: '诚捷', year: 2026, month: 7, status: '待确认', plateNo: '青A001' })).resolves.toEqual(expect.objectContaining({
+      records: [{ code: 'A', plateNo: '青A001' }],
+      total: 1,
+      current: 2,
+      pageSize: 20,
+      summary: expect.objectContaining({ count: 1, profit: 30 }),
+      facets: { years: ['2026'], statuses: ['待确认'], plateNos: ['青A001'] },
+    }))
+
+    const pageCall = query.mock.calls.find(([sql]) => String(sql).includes('SELECT order_json') && String(sql).includes('LIMIT'))
+    expect(pageCall?.[0]).toContain('DATE_ADD(COALESCE(loading_date, STR_TO_DATE(JSON_UNQUOTE(JSON_EXTRACT(order_json, \'$.loadingDate\'))')
+    expect(pageCall?.[1]).toEqual(['%诚捷%', '%诚捷%', '%诚捷%', '%诚捷%', '%诚捷%', '%诚捷%', '%诚捷%', 2026, 7, '待确认', '青A001', 20, 20])
   })
 
   it('upserts a reconciliation archive in MySQL and returns the refreshed list', async () => {

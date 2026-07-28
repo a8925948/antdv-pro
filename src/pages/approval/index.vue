@@ -25,9 +25,14 @@ import {
 import { getUserListApi } from '~@/api/common/user'
 import FinancialPeriodFilter from '~@/components/financial-period-filter/index.vue'
 import SummaryCards from '~@/components/summary-cards/index.vue'
+import { useBusinessDictionaries } from '~@/composables/business-dictionaries'
 import { useFinancialPeriodFilter } from '~@/composables/financial-period-filter'
+import { buildApprovalFlowGroups } from '~@/utils/approval-flow'
+import { calculatePendingApprovalAmount, summarizePendingApprovalAmountsByDepartment } from '~@/utils/approval-summary'
 import { createBusinessTableScrollX, displayBusinessTableValue, enhanceBusinessTableColumns, getBusinessTableValue } from '~@/utils/business-table'
 import { APPROVAL_BUSINESS_CATALOG, approvalInitiationSource } from '../../../shared/approval-business-catalog'
+import { resolveApprovalFinancialPeriod } from '../../../shared/approval-financial-period'
+import ApprovalInsights from './components/approval-insights.vue'
 
 defineOptions({
   name: 'ApprovalCenter',
@@ -36,6 +41,7 @@ defineOptions({
 const route = useRoute()
 const router = useRouter()
 const message = useMessage()
+const businessDictionaries = useBusinessDictionaries()
 const userStore = useUserStore()
 const isAdmin = computed(() => (userStore.userInfo?.roles || []).map(String).some(role => role.toUpperCase() === 'ADMIN'))
 
@@ -81,9 +87,14 @@ const instanceList = ref<ApprovalInstance[]>([])
 const templateList = ref<any[]>([])
 const businessRecords = ref<any[]>([])
 const detailOpen = ref(false)
+const secondaryActionOpen = ref(false)
+const secondaryAction = ref<'reject' | 'transfer'>('reject')
+const secondaryComment = ref('')
+const transferUserId = ref<number>()
 const detail = ref<ApprovalDetail>()
 const createOpen = ref(false)
 const createSubmitting = ref(false)
+const secondarySubmitting = ref(false)
 const userLoading = ref(false)
 const userOptions = ref<SystemUser[]>([])
 const createFormRef = ref()
@@ -130,7 +141,7 @@ const personnelContentOptions: Record<string, string[]> = {
   travel: ['客户拜访', '项目驻场', '供应商沟通', '培训学习', '会议出差', '证照办理', '其他出差'],
 }
 
-const defaultContentOptions = ['日常支出', '项目支出', '行政支出', '财务支出', '经营支出', '其他支出']
+const defaultContentOptions = computed(() => businessDictionaries.values('approval_expense_content'))
 
 const operatorOptions = [
   { label: '部门负责人', value: 4, name: '部门负责人' },
@@ -158,19 +169,24 @@ const approvalStatusOptions = [
 ]
 
 const instanceColumns = [
-  { title: '审批单号', dataIndex: 'code', width: 150 },
+  { title: '审批编号', dataIndex: 'code', width: 150 },
   { title: '提交时间', dataIndex: 'submittedAt', width: 130 },
-  { title: '所属业务', dataIndex: 'businessDomain', width: 100 },
-  { title: '所属部门', dataIndex: 'deptName', width: 140 },
-  { title: '支出类型', dataIndex: 'businessType', width: 130 },
-  { title: '申请事由', dataIndex: 'approvalContent', width: 260 },
-  { title: '金额', dataIndex: 'amount', width: 130 },
+  { title: '财务年度', dataIndex: 'financialYear', width: 110, customRender: ({ record }: any) => approvalFinancialPeriod(record).financialYear || '-' },
+  { title: '财务月份', dataIndex: 'financialMonth', width: 110, customRender: ({ record }: any) => approvalFinancialPeriod(record).financialMonth || '-' },
+  { title: '审批事项', dataIndex: 'businessType', width: 150 },
+  { title: '业务所属部门', dataIndex: 'deptName', width: 150 },
+  { title: '审批金额', dataIndex: 'amount', width: 130 },
+  { title: '审批说明', dataIndex: 'approvalContent', width: 240 },
+  { title: '付款方式', dataIndex: 'paymentMethod', width: 130, customRender: ({ record }: any) => approvalControlValue(record, ['付款方式']) },
+  { title: '付款日期', dataIndex: 'paymentDate', width: 130, customRender: ({ record }: any) => approvalControlValue(record, ['付款日期']) },
+  { title: '收款账号', dataIndex: 'receivingAccount', width: 190, customRender: ({ record }: any) => approvalControlValue(record, ['收款账号']) },
+  { title: '附件', dataIndex: 'attachment', width: 150, customRender: ({ record }: any) => approvalControlValue(record, ['付款凭证附件', '附件']) },
   { title: '申请人', dataIndex: 'applicantName' },
   { title: '审批状态', dataIndex: 'status' },
   { title: '操作', dataIndex: 'action', fixed: 'right' as const, width: 180 },
 ]
 const instanceTableColumns = computed(() => enhanceBusinessTableColumns(instanceColumns))
-const instanceTableScrollX = computed(() => createBusinessTableScrollX(instanceTableColumns.value, 1200))
+const instanceTableScrollX = computed(() => createBusinessTableScrollX(instanceTableColumns.value, 2100))
 
 const taskColumns = [
   { title: '提交时间', dataIndex: 'submittedAt', width: 130 },
@@ -263,6 +279,31 @@ function approvalContent(record: any) {
   return parts.join('；') || instance?.title || '-'
 }
 
+function approvalControlValue(record: any, titles: string[]) {
+  const instance = normalizeRecord(record)
+  const form = instance?.formSnapshot || instance?.payload || {}
+  const controls = Array.isArray(form.controls) ? form.controls : []
+  const control = controls.find((item: any) => titles.includes(String(item?.title || '').trim()))
+  const value = control?.value
+  if (Array.isArray(value))
+    return value.map(item => item?.name || item?.value || item).filter(Boolean).join('、') || '-'
+  if (value && typeof value === 'object')
+    return [value.accountName, value.accountNumber, value.bankName].filter(Boolean).join(' · ') || '-'
+  return value == null || value === '' ? '-' : String(value)
+}
+
+function approvalFinancialPeriod(record: any) {
+  const instance = normalizeRecord(record)
+  const form = instance?.formSnapshot || instance?.payload || {}
+  const paymentDate = form.paymentDate || approvalControlValue(instance, ['付款日期'])
+  const occurredDate = form.occurredDate || approvalControlValue(instance, ['业务日期', '发生日期', '申请日期', '日期', '业务时间'])
+  return resolveApprovalFinancialPeriod(
+    [occurredDate === '-' ? '' : occurredDate, paymentDate === '-' ? '' : paymentDate, form.description, instance?.submittedAt],
+    form.financialYear || approvalControlValue(instance, ['财务年度']),
+    form.financialMonth || approvalControlValue(instance, ['财务月份']),
+  )
+}
+
 function formatApprovalAmount(record: any) {
   const instance = normalizeRecord(record)
   const value = instance?.amount ?? instance?.formSnapshot?.amount ?? instance?.payload?.amount
@@ -305,7 +346,7 @@ const currentContentOptions = computed(() => {
   if (config.category === '人事薪酬类')
     return personnelContentOptions[config.businessType] ?? []
   if (config.category.includes('支出') || ['财务收付款类', '合同采购类', '库存资产类'].includes(config.category))
-    return expenseContentOptions[config.businessType] ?? defaultContentOptions
+    return expenseContentOptions[config.businessType] ?? defaultContentOptions.value
   return []
 })
 const contentOptionLabel = computed(() => currentApprovalType.value?.category === '人事薪酬类' ? '人事/考勤内容' : createForm.businessType === 'receivable' ? '应收业务类型' : '支出内容')
@@ -324,10 +365,7 @@ function todoTaskForInstance(record: Record<string, any>) {
 }
 
 const summaryCards = computed<SummaryCardItem[]>(() => {
-  const allInstances = instanceList.value
-  const pendingAmount = allInstances
-    .filter(item => ['PENDING', 'APPROVING'].includes(item.status))
-    .reduce((total, item: any) => total + Number(item.amount ?? item.formData?.amount ?? 0), 0)
+  const pendingAmount = calculatePendingApprovalAmount(filteredInstanceList.value)
   return [
     { label: '待我审批', value: filteredTodoList.value.length, hint: '当前审批人待办', tone: 'warning' },
     { label: '我发起的', value: filteredSubmittedList.value.length, hint: '本人提交审批', tone: 'primary' },
@@ -335,6 +373,15 @@ const summaryCards = computed<SummaryCardItem[]>(() => {
     { label: '待审批金额', value: `¥${pendingAmount.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`, hint: '按筛选范围估算', tone: 'warning' },
   ]
 })
+
+const departmentAmountCards = computed<SummaryCardItem[]>(() =>
+  summarizePendingApprovalAmountsByDepartment(filteredInstanceList.value).map(item => ({
+    label: item.departmentName,
+    value: `¥${item.amount.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
+    hint: `${item.count} 笔待审`,
+    tone: 'warning',
+  })),
+)
 
 const statusText: Record<string, string> = {
   PENDING: '待审批',
@@ -582,6 +629,25 @@ function getUserDisplayName(userId: string | number) {
   return user?.nickname ?? String(userId)
 }
 
+const approvalFlowGroups = computed(() => buildApprovalFlowGroups(detail.value, getUserDisplayName))
+
+function approvalFlowSummary(group: { status: string, approvers: Array<{ status: string }> }) {
+  const completed = group.approvers.filter(item => item.status === 'APPROVED').length
+  const status = statusText[group.status] || group.status
+  return `${status}（${completed}/${group.approvers.length}）`
+}
+
+function approvalTimelineColor(status: string) {
+  return ({ APPROVED: 'green', REJECTED: 'red', PENDING: 'blue', APPROVING: 'blue' } as Record<string, string>)[status] || 'gray'
+}
+
+function formatApprovalTime(value?: string) {
+  if (!value)
+    return '-'
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? '-' : date.toLocaleString('zh-CN')
+}
+
 const groupedUserOptions = computed(() => {
   const groups = new Map<string, SystemUser[]>()
   userOptions.value.forEach((item) => {
@@ -623,6 +689,8 @@ async function uploadApprovalAttachment(file: File) {
 }
 
 async function submitCreateApproval() {
+  if (createSubmitting.value)
+    return
   try {
     await createFormRef.value?.validate?.()
     createSubmitting.value = true
@@ -631,6 +699,7 @@ async function submitCreateApproval() {
     const businessNo = `MOD-${createForm.businessType}-${Date.now()}`
     const businessId = businessNo
     const approverNames = createForm.approverIds.map(getUserDisplayName)
+    const financialPeriod = resolveApprovalFinancialPeriod([createForm.occurredDate, new Date().toISOString()])
     const templateRes = await createApprovalTemplateApi({
       name: `${createForm.title}审批流程`,
       businessTypes: [createForm.businessType],
@@ -665,6 +734,7 @@ async function submitCreateApproval() {
         counterparty: createForm.counterparty,
         customerName: createForm.counterparty,
         occurredDate: createForm.occurredDate,
+        ...financialPeriod,
         dueDate: createForm.dueDate,
         attachmentName: createForm.attachmentName,
         attachmentUrl: createForm.attachmentUrl,
@@ -674,8 +744,8 @@ async function submitCreateApproval() {
         approverNames,
       },
     })
-    message.success('新增审批成功')
     createOpen.value = false
+    message.success('新增审批成功')
     resetCreateForm()
     await loadAll()
   }
@@ -690,7 +760,10 @@ async function submitCreateApproval() {
 }
 
 async function openDetail(instanceId: string) {
-  const res = await getApprovalDetailApi(instanceId)
+  const [res] = await Promise.all([
+    getApprovalDetailApi(instanceId),
+    userOptions.value.length ? Promise.resolve() : loadUsers(),
+  ])
   detail.value = res.data
   detailOpen.value = true
 }
@@ -703,6 +776,61 @@ async function approveTask(record: any) {
   })
   message.success('审批通过')
   await loadAll()
+}
+
+const detailTodoTask = computed(() => detail.value ? todoTaskByInstanceId.value.get(String(detail.value.instance.id)) : undefined)
+
+async function approveDetailTask() {
+  if (!detailTodoTask.value)
+    return
+  await approveTask(detailTodoTask.value)
+  detailOpen.value = false
+}
+
+function openSecondaryAction(action: 'reject' | 'transfer') {
+  secondaryAction.value = action
+  secondaryComment.value = ''
+  transferUserId.value = undefined
+  secondaryActionOpen.value = true
+}
+
+async function submitSecondaryAction() {
+  if (secondarySubmitting.value)
+    return
+  const task = detailTodoTask.value
+  if (!task)
+    return
+  if (!secondaryComment.value.trim())
+    return message.warning(secondaryAction.value === 'reject' ? '请填写驳回原因' : '请填写转交说明')
+  secondarySubmitting.value = true
+  try {
+    if (secondaryAction.value === 'reject') {
+      await rejectTaskApi(task.id, { operatorId: operator.id, operatorName: operator.name, comment: secondaryComment.value.trim() })
+      message.success('已驳回')
+    }
+    else {
+      const target = userOptions.value.find(item => Number(item.id) === Number(transferUserId.value))
+      if (!target)
+        return message.warning('请选择转交人员')
+      await transferTaskApi(task.id, {
+        operatorId: operator.id,
+        operatorName: operator.name,
+        toUserId: Number(target.id),
+        toUserName: target.nickname || target.username,
+        comment: secondaryComment.value.trim(),
+      })
+      message.success('已转交')
+    }
+    secondaryActionOpen.value = false
+    detailOpen.value = false
+    await loadAll()
+  }
+  catch (error: any) {
+    message.error(error?.message || '审批操作失败')
+  }
+  finally {
+    secondarySubmitting.value = false
+  }
 }
 
 async function rejectTask(record: any) {
@@ -744,7 +872,10 @@ async function archiveInstance(record: any) {
 }
 
 watch(() => operator.id, loadAll)
-onMounted(loadAll)
+onMounted(async () => {
+  await businessDictionaries.load()
+  await loadAll()
+})
 </script>
 
 <template>
@@ -763,7 +894,14 @@ onMounted(loadAll)
       </template>
     </a-alert>
 
-    <SummaryCards :cards="summaryCards" :loading="loading" :xl-span="6" compact />
+    <SummaryCards :cards="summaryCards" :loading="loading" :data-state="filteredInstanceList.length ? 'ready' : 'empty'" :xl-span="6" compact />
+    <section class="department-amount-summary" aria-labelledby="department-amount-title">
+      <div id="department-amount-title" class="department-amount-title">
+        各业务部门待审批金额
+      </div>
+      <SummaryCards :cards="departmentAmountCards" :loading="loading" :data-state="filteredInstanceList.length ? 'ready' : 'empty'" :xl-span="6" compact />
+    </section>
+    <ApprovalInsights :instances="filteredInstanceList" :todo="filteredTodoList" :done="filteredDoneList" />
 
     <a-card :bordered="false" mb-4>
       <a-row :gutter="[16, 16]" align="middle">
@@ -859,6 +997,24 @@ onMounted(loadAll)
               </template>
               <template v-else-if="column.dataIndex === 'submittedAt'">
                 {{ formatSubmittedDate(record) }}
+              </template>
+              <template v-else-if="column.dataIndex === 'financialYear'">
+                {{ approvalFinancialPeriod(record).financialYear || '-' }}
+              </template>
+              <template v-else-if="column.dataIndex === 'financialMonth'">
+                {{ approvalFinancialPeriod(record).financialMonth || '-' }}
+              </template>
+              <template v-else-if="column.dataIndex === 'paymentMethod'">
+                {{ record.formSnapshot?.paymentMethod || approvalControlValue(record, ['付款方式']) }}
+              </template>
+              <template v-else-if="column.dataIndex === 'paymentDate'">
+                {{ record.formSnapshot?.paymentDate || approvalControlValue(record, ['付款日期']) }}
+              </template>
+              <template v-else-if="column.dataIndex === 'receivingAccount'">
+                {{ record.formSnapshot?.receivingAccount ? [record.formSnapshot.receivingAccount.accountName, record.formSnapshot.receivingAccount.accountNumber].filter(Boolean).join(' · ') : approvalControlValue(record, ['收款账户', '收款账号']) }}
+              </template>
+              <template v-else-if="column.dataIndex === 'attachment'">
+                {{ record.formSnapshot?.attachmentName || approvalControlValue(record, ['付款凭证附件', '附件']) }}
               </template>
               <template v-else-if="column.dataIndex === 'action'">
                 <a-space>
@@ -1138,6 +1294,9 @@ onMounted(loadAll)
       cancel-text="取消"
       :mask-closable="false"
       :confirm-loading="createSubmitting"
+      :closable="!createSubmitting"
+      :keyboard="!createSubmitting"
+      :cancel-button-props="{ disabled: createSubmitting }"
       @ok="submitCreateApproval"
       @cancel="closeCreateApproval"
     >
@@ -1183,7 +1342,7 @@ onMounted(loadAll)
           </a-col>
           <a-col :xs="24" :md="12">
             <a-form-item v-if="currentApprovalType?.requireAmount" label="审批金额" name="amount">
-              <a-input-number v-model:value="createForm.amount" :min="0" :precision="2" prefix="¥" style="width: 100%;" />
+              <business-input-number v-model:value="createForm.amount" :min="0" :precision="2" prefix="¥" style="width: 100%;" />
             </a-form-item>
           </a-col>
           <a-col :xs="24" :md="12">
@@ -1210,12 +1369,12 @@ onMounted(loadAll)
           </a-col>
           <a-col :xs="24" :md="12">
             <a-form-item label="业务日期" name="occurredDate">
-              <a-input v-model:value="createForm.occurredDate" placeholder="YYYY-MM-DD" />
+              <a-date-picker v-model:value="createForm.occurredDate" value-format="YYYY-MM-DD" format="YYYY-MM-DD" :allow-clear="false" style="width: 100%;" />
             </a-form-item>
           </a-col>
           <a-col :xs="24" :md="12">
             <a-form-item label="到期日期" name="dueDate">
-              <a-input v-model:value="createForm.dueDate" placeholder="YYYY-MM-DD" />
+              <a-date-picker v-model:value="createForm.dueDate" value-format="YYYY-MM-DD" format="YYYY-MM-DD" style="width: 100%;" />
             </a-form-item>
           </a-col>
         </a-row>
@@ -1285,6 +1444,12 @@ onMounted(loadAll)
               {{ statusText[detail.instance.status] || detail.instance.status }}
             </a-tag>
           </a-descriptions-item>
+          <a-descriptions-item label="财务年度">
+            {{ approvalFinancialPeriod(detail.instance).financialYear || '-' }}
+          </a-descriptions-item>
+          <a-descriptions-item label="财务月份">
+            {{ approvalFinancialPeriod(detail.instance).financialMonth || '-' }}
+          </a-descriptions-item>
           <a-descriptions-item label="业务类型">
             {{ formatBusinessType(detail.instance) }}
           </a-descriptions-item>
@@ -1327,16 +1492,27 @@ onMounted(loadAll)
         </a-descriptions>
 
         <a-divider>审批节点</a-divider>
-        <a-steps v-if="detail.nodes.length" direction="vertical" size="small" :current="detail?.nodes.findIndex(item => item.id === detail?.instance.currentNodeId) ?? 0">
-          <a-step v-for="node in detail?.nodes ?? []" :key="node.id" :title="node.name" :description="node.status" />
-        </a-steps>
-        <a-timeline v-else-if="detail.instance.formSnapshot?.approvalFlow?.length">
-          <template v-for="(flow, flowIndex) in detail.instance.formSnapshot.approvalFlow" :key="flowIndex">
-            <a-timeline-item v-for="approver in flow.approvers" :key="`${flowIndex}-${approver.userId}`" color="green">
-              {{ approver.name }} · {{ statusText[approver.status] || approver.status }} · {{ approver.actedAt ? new Date(approver.actedAt).toLocaleString('zh-CN') : '-' }}
-            </a-timeline-item>
-          </template>
-        </a-timeline>
+        <div v-if="approvalFlowGroups.length" class="approval-flow-list">
+          <section v-for="group in approvalFlowGroups" :key="group.key" class="approval-flow-group">
+            <div class="approval-flow-heading">
+              <span>{{ group.title }}</span>
+              <a-tag :color="statusColor[group.status]">
+                {{ approvalFlowSummary(group) }}
+              </a-tag>
+            </div>
+            <a-timeline class="approval-people-list">
+              <a-timeline-item v-for="approver in group.approvers" :key="approver.key" :color="approvalTimelineColor(approver.status)">
+                <div class="approval-person-row">
+                  <strong>{{ approver.name }}</strong>
+                  <span>{{ statusText[approver.status] || approver.status }} · {{ formatApprovalTime(approver.actedAt) }}</span>
+                </div>
+                <div v-if="approver.comment" class="approval-person-comment">
+                  {{ approver.comment }}
+                </div>
+              </a-timeline-item>
+            </a-timeline>
+          </section>
+        </div>
         <a-empty v-else description="暂无审批节点" />
 
         <a-divider>审批日志</a-divider>
@@ -1346,11 +1522,70 @@ onMounted(loadAll)
           </a-timeline-item>
         </a-timeline>
       </template>
+      <template v-if="detailTodoTask" #footer>
+        <div class="approval-drawer-footer">
+          <span>当前操作将记录到审批日志</span>
+          <a-space>
+            <a-button danger @click="openSecondaryAction('reject')">
+              驳回
+            </a-button>
+            <a-button @click="openSecondaryAction('transfer')">
+              转交
+            </a-button>
+            <a-button type="primary" @click="approveDetailTask">
+              同意
+            </a-button>
+          </a-space>
+        </div>
+      </template>
     </a-drawer>
+
+    <a-modal
+      v-model:open="secondaryActionOpen"
+      :title="secondaryAction === 'reject' ? '驳回审批' : '转交审批'"
+      width="480px"
+      :ok-text="secondaryAction === 'reject' ? '确认驳回' : '确认转交'"
+      :confirm-loading="secondarySubmitting"
+      :mask-closable="!secondarySubmitting"
+      :closable="!secondarySubmitting"
+      :keyboard="!secondarySubmitting"
+      :cancel-button-props="{ disabled: secondarySubmitting }"
+      :ok-button-props="{ danger: secondaryAction === 'reject' }"
+      @ok="submitSecondaryAction"
+    >
+      <a-form layout="vertical">
+        <a-form-item v-if="secondaryAction === 'transfer'" label="转交人员" required>
+          <a-select v-model:value="transferUserId" show-search option-filter-prop="label" placeholder="请选择接收人">
+            <a-select-option v-for="item in userOptions" :key="item.id" :value="Number(item.id)" :label="`${item.nickname || item.username} ${item.deptName || ''}`">
+              {{ item.nickname || item.username }} · {{ item.deptName || '未分配部门' }}
+            </a-select-option>
+          </a-select>
+        </a-form-item>
+        <a-form-item :label="secondaryAction === 'reject' ? '驳回原因' : '转交说明'" required>
+          <a-textarea v-model:value="secondaryComment" :rows="4" :maxlength="300" show-count />
+        </a-form-item>
+      </a-form>
+    </a-modal>
   </page-container>
 </template>
 
 <style scoped lang="less">
+.department-amount-summary {
+  margin-bottom: 16px;
+
+  :deep(.summary-cards) {
+    margin-bottom: 0;
+  }
+}
+
+.department-amount-title {
+  margin-bottom: 10px;
+  color: var(--admin-text);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 22px;
+}
+
 .detail-toolbar {
   display: flex;
   align-items: center;
@@ -1359,6 +1594,46 @@ onMounted(loadAll)
   margin-bottom: 16px;
   padding-bottom: 16px;
   border-bottom: 1px solid var(--color-border-secondary);
+}
+.approval-flow-list {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.approval-flow-group {
+  padding-bottom: 4px;
+}
+.approval-flow-heading,
+.approval-person-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.approval-flow-heading {
+  margin-bottom: 14px;
+  font-weight: 600;
+}
+.approval-people-list {
+  margin-left: 6px;
+}
+.approval-person-row > span,
+.approval-person-comment {
+  color: var(--admin-muted);
+  font-size: 13px;
+}
+.approval-person-comment {
+  margin-top: 4px;
+}
+.approval-drawer-footer {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  justify-content: space-between;
+}
+.approval-drawer-footer > span {
+  color: var(--admin-muted);
+  font-size: 12px;
 }
 
 .approval-content-cell {
@@ -1382,6 +1657,15 @@ onMounted(loadAll)
   .detail-toolbar {
     align-items: flex-start;
     flex-direction: column;
+  }
+  .approval-drawer-footer {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  .approval-person-row {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 2px;
   }
 }
 </style>

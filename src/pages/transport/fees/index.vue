@@ -11,7 +11,7 @@ import type {
   RegulatoryFeeStatus,
 } from '~@/api/transport/fees'
 import type { RecordActionItem } from '~@/components/record-actions/index.vue'
-import { DownloadOutlined, PlusOutlined, UploadOutlined } from '@ant-design/icons-vue'
+import { DownloadOutlined, FileOutlined, PlusOutlined, UploadOutlined } from '@ant-design/icons-vue'
 import dayjs from 'dayjs'
 import { cloneDeep } from 'lodash-es'
 import * as XLSX from 'xlsx'
@@ -27,13 +27,18 @@ import {
   submitRegulatoryFeeApprovalApi,
   updateRegulatoryFeeApi,
 } from '~@/api/transport/fees'
+import BusinessDetailDrawer from '~@/components/business-detail-drawer/index.vue'
 import RecordActions from '~@/components/record-actions/index.vue'
+import SummaryCards from '~@/components/summary-cards/index.vue'
+import { useBusinessDictionaries } from '~@/composables/business-dictionaries'
 import { createFinancialMonthOptions, createFinancialYearOptions } from '~@/composables/financial-period-filter'
 import { useRecordPermission } from '~@/composables/record-permission'
 import { transportVehicleOptions } from '~@/data/transport-vehicles'
 import { createBusinessTableScrollX, displayBusinessTableValue, enhanceBusinessTableColumns, getBusinessTableValue } from '~@/utils/business-table'
+import { createFinancialComparison } from '~@/utils/financial-comparison'
 import { getCurrentFinancialMonthRange } from '~@/utils/financialPeriod'
 import { downloadWorkbook } from '~@/utils/xlsx-export'
+import RegulatoryFeeInsights from '../components/regulatory-fee-insights.vue'
 import { parseRegulatoryFeeWorkbook } from './import-utils'
 
 interface QueryModel {
@@ -52,23 +57,11 @@ type FeeFormModel = Omit<RegulatoryFeePayload, 'validStartDate' | 'validEndDate'
 }
 
 const message = useMessage()
+const businessDictionaries = useBusinessDictionaries()
 const route = useRoute()
 const { canViewRecord, canEditRecord, canDeleteRecord } = useRecordPermission()
 
-const regulatoryFeeTypeOptions = [
-  '交强险',
-  '主车商业险',
-  '挂车商业险',
-  '车辆意外险',
-  '承运人责任险',
-  'GPS年费',
-  '主车行驶证',
-  '挂车行驶证',
-  '气瓶年审',
-  '罐体检测',
-  '安全阀年检',
-  '压力表校验',
-].map(value => ({ label: value, value }))
+const regulatoryFeeTypeOptions = computed(() => businessDictionaries.options('regulatory_fee_type'))
 const vehicleSelectOptions = transportVehicleOptions.map(item => ({
   label: `${item.plateNo} / ${item.trailerNo || '无挂车'}`,
   value: item.plateNo,
@@ -120,11 +113,45 @@ const overviewSummary = ref<RegulatoryFeeOverviewSummary>({
 })
 const recordSummary = ref({
   activeCount: 0,
+  currentMonthCount: 0,
   financialYearAmount: 0,
   financialMonthAmount: 0,
   monthlyAmortizedAmount: 0,
+  approvalTotalAmount: 0,
+  usedAmount: 0,
+  previousMonthCount: 0,
+  previousMonthAmount: 0,
+  previousApprovalTotalAmount: 0,
+  previousUsedAmount: 0,
   typeAmounts: [] as Array<{ feeType: string, amount: number, count: number }>,
 })
+
+const summaryCards = computed(() => [
+  {
+    label: '本月生效规费',
+    value: recordSummary.value.currentMonthCount,
+    comparison: createFinancialComparison(recordSummary.value.currentMonthCount, recordSummary.value.previousMonthCount, `${recordSummary.value.previousMonthCount} 笔`),
+    tone: 'primary' as const,
+  },
+  {
+    label: '财务月费用',
+    value: formatAmount(recordSummary.value.financialMonthAmount),
+    comparison: createFinancialComparison(recordSummary.value.financialMonthAmount, recordSummary.value.previousMonthAmount, formatAmount(recordSummary.value.previousMonthAmount)),
+    tone: 'success' as const,
+  },
+  {
+    label: '审批金额',
+    value: formatAmount(recordSummary.value.approvalTotalAmount),
+    comparison: createFinancialComparison(recordSummary.value.approvalTotalAmount, recordSummary.value.previousApprovalTotalAmount, formatAmount(recordSummary.value.previousApprovalTotalAmount)),
+    tone: 'warning' as const,
+  },
+  {
+    label: '已使用金额',
+    value: formatAmount(recordSummary.value.usedAmount),
+    comparison: createFinancialComparison(recordSummary.value.usedAmount, recordSummary.value.previousUsedAmount, formatAmount(recordSummary.value.previousUsedAmount)),
+    tone: 'default' as const,
+  },
+])
 
 const modalOpen = ref(false)
 const detailOpen = ref(false)
@@ -142,6 +169,9 @@ const importSubmitting = ref(false)
 const importFileName = ref('')
 const importRecords = ref<Array<RegulatoryFeePayload & { rowNumber: number }>>([])
 const importErrors = ref<string[]>([])
+const attachmentUploading = ref(false)
+const attachmentsLoading = ref(false)
+const allAttachmentRecords = ref<RegulatoryFeeModel[]>([])
 
 const overviewColumns = [
   { title: '序号', dataIndex: 'id', width: '4%' },
@@ -225,6 +255,13 @@ const { state, initQuery, query } = useTableQuery({
     state.queryParams = buildRecordQueryParams()
   },
 })
+const attachmentRows = computed(() => allAttachmentRecords.value.filter((row) => {
+  if (!row.attachmentName)
+    return false
+  if (queryModel.feeType && row.feeType !== queryModel.feeType)
+    return false
+  return !queryModel.plateNo || normalizePlateKey(row.plateNo).includes(normalizePlateKey(queryModel.plateNo))
+}))
 const linkedRecordRows = computed(() => state.dataSource.map(row => ({
   ...row,
   area: getBaseVehicleArea(row.plateNo) || row.area,
@@ -262,6 +299,8 @@ function createEmptyForm(): FeeFormModel {
     totalAmount: 0,
     dateRange: undefined,
     remark: '',
+    attachmentName: undefined,
+    attachmentUrl: undefined,
   }
 }
 
@@ -289,6 +328,8 @@ function buildPayload(): RegulatoryFeePayload {
     validStartDate: start.format('YYYY-MM-DD'),
     validEndDate: end.format('YYYY-MM-DD'),
     remark: formData.value.remark,
+    attachmentName: formData.value.attachmentName,
+    attachmentUrl: formData.value.attachmentUrl,
   }
 }
 
@@ -342,24 +383,42 @@ async function loadOverview() {
 
 async function loadRecordSummary() {
   const { financialYear, financialMonth } = getSelectedFinancialPeriod()
+  const previousPeriod = dayjs(`${financialYear}-${String(financialMonth).padStart(2, '0')}-01`).subtract(1, 'month')
   const baseQuery = {
     plateNo: queryModel.plateNo,
     trailerNo: queryModel.trailerNo,
     feeType: queryModel.feeType,
     status: '生效中' as RegulatoryFeeStatus,
   }
-  const [activeRes, yearRes, monthRes] = await Promise.all([
+  const [activeRes, yearRes, monthRes, previousMonthRes] = await Promise.all([
     getRegulatoryFeeSummaryApi(baseQuery),
     getRegulatoryFeeSummaryApi({ ...baseQuery, financialYear }),
     getRegulatoryFeeSummaryApi({ ...baseQuery, financialYear, financialMonth }),
+    getRegulatoryFeeSummaryApi({ ...baseQuery, financialYear: previousPeriod.year(), financialMonth: previousPeriod.month() + 1 }),
   ])
   recordSummary.value = {
     activeCount: Number(activeRes.data?.activeCount || 0),
+    currentMonthCount: Number(monthRes.data?.activeCount || 0),
     financialYearAmount: Number(yearRes.data?.totalAmount || 0),
     financialMonthAmount: Number(monthRes.data?.totalAmount || 0),
     monthlyAmortizedAmount: Number(activeRes.data?.monthlyAmortizedAmount || 0),
+    approvalTotalAmount: Number(monthRes.data?.approvalTotalAmount || 0),
+    usedAmount: Number(monthRes.data?.usedAmount || 0),
+    previousMonthCount: Number(previousMonthRes.data?.activeCount || 0),
+    previousMonthAmount: Number(previousMonthRes.data?.totalAmount || 0),
+    previousApprovalTotalAmount: Number(previousMonthRes.data?.approvalTotalAmount || 0),
+    previousUsedAmount: Number(previousMonthRes.data?.usedAmount || 0),
     typeAmounts: monthRes.data?.typeAmounts ?? [],
   }
+}
+
+async function loadAttachments() {
+  attachmentsLoading.value = true
+  try {
+    const res = await getRegulatoryFeeListApi({ current: 1, pageSize: 10000 })
+    allAttachmentRecords.value = res.data?.records ?? []
+  }
+  finally { attachmentsLoading.value = false }
 }
 
 function getSelectedFinancialPeriod() {
@@ -418,7 +477,7 @@ async function handleImport(file: File) {
   importErrors.value = []
   try {
     const workbook = XLSX.read(await file.arrayBuffer(), { cellDates: true })
-    const result = parseRegulatoryFeeWorkbook(workbook, regulatoryFeeTypeOptions.map(item => item.value))
+    const result = parseRegulatoryFeeWorkbook(workbook, regulatoryFeeTypeOptions.value.map(item => item.value))
     importRecords.value = result.records
     importErrors.value = result.errors
     importModalOpen.value = true
@@ -430,6 +489,8 @@ async function handleImport(file: File) {
 }
 
 async function confirmImport() {
+  if (importSubmitting.value)
+    return
   if (importErrors.value.length)
     return message.warning('请修正错误后重新选择文件')
   if (!importRecords.value.length)
@@ -471,6 +532,14 @@ function handleView(record: RegulatoryFeeModel) {
   detailOpen.value = true
 }
 
+function editDetailRecord() {
+  if (!detailRecord.value)
+    return
+  const record = detailRecord.value
+  detailOpen.value = false
+  handleEdit(record)
+}
+
 function handleEdit(record: RegulatoryFeeModel) {
   const permission = canEditRecord(record)
   if (!permission.allowed)
@@ -485,11 +554,41 @@ function handleEdit(record: RegulatoryFeeModel) {
     totalAmount: record.totalAmount,
     dateRange: [dayjs(record.validStartDate), dayjs(record.validEndDate)],
     remark: record.remark,
+    attachmentName: record.attachmentName,
+    attachmentUrl: record.attachmentUrl,
   }
   modalOpen.value = true
 }
 
+async function uploadFeeAttachment(file: File) {
+  attachmentUploading.value = true
+  try {
+    const body = new FormData()
+    body.append('file', file)
+    const response = await fetch('/api/uploads', { method: 'POST', body })
+    const result = await response.json()
+    if (!response.ok || result.code !== 200)
+      throw new Error(result.msg || '附件上传失败')
+    formData.value.attachmentName = result.data.originalName
+    formData.value.attachmentUrl = result.data.url
+    message.success('附件上传成功')
+  }
+  catch (error: any) {
+    message.error(error?.message || '附件上传失败')
+  }
+  finally { attachmentUploading.value = false }
+  return false
+}
+
+function openAttachments(record?: RegulatoryFeeModel) {
+  activeTab.value = 'attachments'
+  if (record?.feeType)
+    queryModel.feeType = record.feeType
+}
+
 async function handleSubmit() {
+  if (submitting.value)
+    return
   try {
     await formRef.value?.validate()
     submitting.value = true
@@ -499,10 +598,9 @@ async function handleSubmit() {
       : await createRegulatoryFeeApi(payload)
     if (res.code !== 200)
       return message.error(res.msg)
-    message.success(isUpdate.value ? '编辑成功' : '新增成功')
     modalOpen.value = false
-    await query()
-    await loadOverview()
+    message.success(isUpdate.value ? '规费编辑成功' : '规费录入成功')
+    await Promise.all([query(), loadOverview(), loadAttachments(), loadRecordSummary()])
   }
   finally {
     submitting.value = false
@@ -521,6 +619,7 @@ async function handleDelete(record: RegulatoryFeeModel) {
   message.success('删除成功')
   await query()
   await loadOverview()
+  await loadAttachments()
 }
 
 async function handleStatusChange(record: RegulatoryFeeModel) {
@@ -536,6 +635,7 @@ async function handleStatusChange(record: RegulatoryFeeModel) {
   message.success(manualStatus === 'disabled' ? '已停用' : '已启用')
   await query()
   await loadOverview()
+  await loadAttachments()
 }
 
 function handleEditRecord(record: Record<string, any>) {
@@ -578,6 +678,12 @@ function getRecordActions(record: Record<string, any>): RecordActionItem[] {
       hidden: !canEdit.allowed,
       disabled: !canEdit.allowed,
       onClick: () => handleEditRecord(record),
+    },
+    {
+      key: 'attachment',
+      label: '查找附件',
+      hidden: !record.attachmentName,
+      onClick: () => openAttachments(record as RegulatoryFeeModel),
     },
     {
       key: 'status',
@@ -732,104 +838,30 @@ function validateDateRange() {
 }
 
 onMounted(async () => {
+  await businessDictionaries.load()
   queryModel.plateNo = typeof route.query.plateNo === 'string' ? route.query.plateNo : undefined
   queryModel.feeType = typeof route.query.feeType === 'string' ? route.query.feeType : undefined
-  activeTab.value = route.query.tab === 'records' ? 'records' : 'overview'
+  activeTab.value = ['records', 'attachments'].includes(String(route.query.tab)) ? String(route.query.tab) : 'overview'
   await query()
   loadOverview()
   loadRecordSummary()
+  loadAttachments()
 
   const recordId = typeof route.query.recordId === 'string' ? route.query.recordId : ''
   const record = state.dataSource.find(item => String(item.id) === recordId)
   if (record)
     handleView(record)
+
+  if (route.query.action === 'create') {
+    handleAdd()
+  }
 })
 </script>
 
 <template>
   <page-container class="regulatory-fee-page">
-    <a-row class="summary-grid" :gutter="[16, 16]">
-      <a-col :xs="24" :md="12" :xl="6">
-        <a-card class="overview-card" :bordered="false" :loading="overviewLoading">
-          <div class="overview-card-main">
-            <div>
-              <div class="overview-label">
-                生效规费总笔数
-              </div>
-              <div class="overview-value">
-                {{ recordSummary.activeCount }}
-              </div>
-            </div>
-            <div class="overview-badge">
-              笔
-            </div>
-          </div>
-          <div class="overview-hint">
-            当前状态为生效中的规费记录
-          </div>
-        </a-card>
-      </a-col>
-      <a-col :xs="24" :md="12" :xl="6">
-        <a-card class="overview-card" :bordered="false" :loading="overviewLoading">
-          <div class="overview-card-main">
-            <div>
-              <div class="overview-label">
-                生效财务年费用
-              </div>
-              <div class="overview-value">
-                {{ formatAmount(recordSummary.financialYearAmount) }}
-              </div>
-            </div>
-            <div class="overview-badge amount">
-              ¥
-            </div>
-          </div>
-          <div class="overview-hint">
-            生效规费在所选财务年的平摊费用
-          </div>
-        </a-card>
-      </a-col>
-      <a-col :xs="24" :md="12" :xl="6">
-        <a-card class="overview-card" :bordered="false" :loading="state.loading">
-          <div class="overview-card-main">
-            <div>
-              <div class="overview-label">
-                财务月费用
-              </div>
-              <div class="overview-value">
-                {{ formatAmount(recordSummary.financialMonthAmount) }}
-              </div>
-            </div>
-            <div class="overview-badge approval">
-              月
-            </div>
-          </div>
-          <div class="overview-hint">
-            生效规费在所选财务月的平摊费用
-          </div>
-        </a-card>
-      </a-col>
-      <a-col :xs="24" :md="12" :xl="6">
-        <a-card class="overview-card" :bordered="false" :loading="state.loading">
-          <div class="overview-card-main">
-            <div>
-              <div class="overview-label">
-                月均摊金额
-              </div>
-              <div class="overview-value">
-                {{ formatAmount(recordSummary.monthlyAmortizedAmount) }}
-              </div>
-            </div>
-            <div class="overview-badge used">
-              摊
-            </div>
-          </div>
-          <div class="overview-hint">
-            当前生效规费每月应摊金额合计
-          </div>
-        </a-card>
-      </a-col>
-    </a-row>
+    <SummaryCards :cards="summaryCards" :loading="overviewLoading || state.loading" compact />
+    <RegulatoryFeeInsights :rows="linkedRecordRows" />
 
     <div class="fee-type-grid">
       <div v-for="item in recordSummary.typeAmounts" :key="item.feeType" class="fee-type-col">
@@ -1075,8 +1107,46 @@ onMounted(async () => {
 
         <a-tab-pane key="attachments" tab="规费附件管理">
           <div class="tab-panel">
-            <div class="empty-panel">
-              <a-empty description="暂无规费附件" />
+            <div class="table-panel">
+              <div class="table-panel-header">
+                <div>
+                  <div class="table-title">
+                    规费附件管理
+                  </div>
+                  <div class="table-subtitle">
+                    附件按规费类型归类，可通过车号快速定位原始凭证
+                  </div>
+                </div>
+              </div>
+              <a-table
+                row-key="id"
+                :loading="attachmentsLoading"
+                :data-source="attachmentRows"
+                :pagination="false"
+                :columns="[
+                  { title: '规费分类', dataIndex: 'feeType', width: 140 },
+                  { title: '车号 / 挂号', dataIndex: 'vehicleNo', width: 170 },
+                  { title: '有效期', dataIndex: 'validity', width: 220 },
+                  { title: '附件', dataIndex: 'attachmentName' },
+                ]"
+              >
+                <template #bodyCell="{ column, record }">
+                  <template v-if="column.dataIndex === 'vehicleNo'">
+                    {{ formatVehicleNo(record.plateNo, record.trailerNo, ' / ') }}
+                  </template>
+                  <template v-else-if="column.dataIndex === 'validity'">
+                    {{ record.validStartDate }} 至 {{ record.validEndDate }}
+                  </template>
+                  <template v-else-if="column.dataIndex === 'attachmentName'">
+                    <a :href="record.attachmentUrl" target="_blank" rel="noopener" class="attachment-link">
+                      <FileOutlined />{{ record.attachmentName }}
+                    </a>
+                  </template>
+                </template>
+                <template #emptyText>
+                  <a-empty description="暂无规费附件" />
+                </template>
+              </a-table>
             </div>
           </div>
         </a-tab-pane>
@@ -1089,9 +1159,15 @@ onMounted(async () => {
       :confirm-loading="submitting"
       width="680px"
       :mask-closable="false"
+      :closable="!submitting"
+      :keyboard="!submitting"
+      :cancel-button-props="{ disabled: submitting }"
       @ok="handleSubmit"
     >
       <a-form ref="formRef" :model="formData" :rules="formRules" :label-col="{ style: { width: '130px' } }">
+        <div class="fee-form-group-title">
+          规费与车辆
+        </div>
         <a-form-item name="feeType" label="规费类型">
           <a-select v-model:value="formData.feeType" placeholder="请选择规费类型" :options="regulatoryFeeTypeOptions" />
         </a-form-item>
@@ -1112,8 +1188,11 @@ onMounted(async () => {
         <a-form-item name="area" label="所在区域">
           <a-input v-model:value="formData.area" :maxlength="50" placeholder="选择车号后自动带出" readonly />
         </a-form-item>
+        <div class="fee-form-group-title">
+          有效期与金额
+        </div>
         <a-form-item name="totalAmount" label="单项总费用">
-          <a-input-number v-model:value="formData.totalAmount" class="w-full" :min="0" :precision="2" placeholder="请输入金额" />
+          <business-input-number v-model:value="formData.totalAmount" class="w-full" :min="0" :precision="2" placeholder="请输入金额" />
         </a-form-item>
         <a-form-item name="dateRange" label="有效期">
           <a-range-picker v-model:value="formData.dateRange" class="w-full" :disabled-date="disabledEndDate" />
@@ -1131,6 +1210,29 @@ onMounted(async () => {
         <a-form-item name="remark" label="备注">
           <a-textarea v-model:value="formData.remark" show-count :maxlength="500" placeholder="请输入备注" />
         </a-form-item>
+        <div class="fee-form-group-title">
+          附件凭证
+        </div>
+        <a-form-item label="附件">
+          <div class="attachment-field">
+            <a-upload
+              :show-upload-list="false"
+              accept="image/*,.pdf,.doc,.docx,.xls,.xlsx,.txt,.csv"
+              :before-upload="uploadFeeAttachment"
+            >
+              <a-button :loading="attachmentUploading">
+                <template #icon>
+                  <UploadOutlined />
+                </template>
+                {{ formData.attachmentName ? '重新上传' : '上传附件' }}
+              </a-button>
+            </a-upload>
+            <a v-if="formData.attachmentUrl" :href="formData.attachmentUrl" target="_blank" rel="noopener" class="attachment-link">
+              <FileOutlined />{{ formData.attachmentName }}
+            </a>
+            <span v-else class="attachment-hint">支持图片、PDF、Office 文件，保存后自动归入规费附件管理</span>
+          </div>
+        </a-form-item>
       </a-form>
     </a-modal>
     <a-modal
@@ -1138,6 +1240,10 @@ onMounted(async () => {
       title="规费记录导入确认"
       width="920px"
       :confirm-loading="importSubmitting"
+      :mask-closable="!importSubmitting"
+      :closable="!importSubmitting"
+      :keyboard="!importSubmitting"
+      :cancel-button-props="{ disabled: importSubmitting }"
       :ok-button-props="{ disabled: importErrors.length > 0 || importRecords.length === 0 }"
       ok-text="确认导入"
       @ok="confirmImport"
@@ -1183,8 +1289,15 @@ onMounted(async () => {
         ]"
       />
     </a-modal>
-    <a-modal v-model:open="detailOpen" title="规费详情" :footer="null" width="640px">
-      <a-descriptions v-if="detailRecord" bordered :column="2" size="small">
+    <BusinessDetailDrawer
+      v-model:open="detailOpen"
+      :title="detailRecord?.feeName || '规费详情'"
+      :subtitle="detailRecord ? formatVehicleNo(detailRecord.plateNo, detailRecord.trailerNo, ' / ') : ''"
+      :status="detailRecord?.status"
+      :status-color="detailRecord ? statusColor(detailRecord.status) : 'default'"
+      :width="680"
+    >
+      <a-descriptions v-if="detailRecord" title="规费信息" bordered :column="2" size="small">
         <a-descriptions-item label="规费类型">
           {{ detailRecord.feeType }}
         </a-descriptions-item>
@@ -1223,7 +1336,15 @@ onMounted(async () => {
           {{ detailRecord.remark || '-' }}
         </a-descriptions-item>
       </a-descriptions>
-    </a-modal>
+      <template v-if="detailRecord" #footer>
+        <a-button @click="detailOpen = false">
+          关闭
+        </a-button>
+        <a-button v-if="canEditRecord(detailRecord).allowed" type="primary" @click="editDetailRecord">
+          编辑规费
+        </a-button>
+      </template>
+    </BusinessDetailDrawer>
     <a-modal
       v-model:open="feeTypeDetailOpen"
       :title="`${feeTypeDetailName}明细`"
@@ -1264,6 +1385,14 @@ onMounted(async () => {
 </template>
 
 <style lang="less" scoped>
+.fee-form-group-title {
+  margin: 4px 0 14px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--admin-border-subtle);
+  color: var(--admin-text);
+  font-size: 14px;
+  font-weight: 650;
+}
 .regulatory-fee-page {
   :deep(.ant-page-header-heading-title) {
     color: #172033;
@@ -1492,6 +1621,27 @@ onMounted(async () => {
   border-color: rgb(15 23 42 / 8%);
   border-radius: 8px;
   background: #fff;
+}
+
+.attachment-field {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 12px;
+}
+
+.attachment-link {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+  color: #1677ff;
+  overflow-wrap: anywhere;
+}
+
+.attachment-hint {
+  color: #64748b;
+  font-size: 13px;
 }
 
 .toolbar-panel {

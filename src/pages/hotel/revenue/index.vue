@@ -1,7 +1,9 @@
 <script setup lang="ts">
-import { DeleteOutlined, DownloadOutlined, PlusOutlined } from '@ant-design/icons-vue'
+import { DeleteOutlined, DownloadOutlined, EditOutlined, EyeOutlined, PlusOutlined } from '@ant-design/icons-vue'
 import { Column, Line } from '@antv/g2plot'
 import dayjs from 'dayjs'
+import BusinessDetailDrawer from '~@/components/business-detail-drawer/index.vue'
+import { useBusinessDictionaries } from '~@/composables/business-dictionaries'
 import { createBusinessTableScrollX, displayBusinessTableValue, enhanceBusinessTableColumns, getBusinessTableValue } from '~@/utils/business-table'
 import { financialPeriodKeyFromDate } from '../../../../shared/business-overview'
 
@@ -10,12 +12,10 @@ type FlowType = '收入' | '支出'
 interface RevenueRecord {
   id: string
   date: string
-  time: string
   type: FlowType
   category: string
   amount: number
   paymentMethod: string
-  roomOrOrderNo: string
   handler: string
   remark: string
 }
@@ -40,11 +40,16 @@ interface DailyReport {
   averageRoomRate: number
 }
 
-const TOTAL_ROOMS = 100
 const message = useMessage()
+const businessDictionaries = useBusinessDictionaries()
 const route = useRoute()
-const categories = ['房费', '押金', '退款', '商品售卖', '采购', '水电', '维修', '工资', '平台佣金', '其他']
-const paymentMethods = ['现金', '微信', '支付宝', '银行卡', 'OTA平台']
+const categories = computed(() => businessDictionaries.values('hotel_revenue_category'))
+// Keep the shared dictionary editable, while presenting only categories that
+// make sense for the currently selected flow type.
+const incomeCategoryNames = new Set(['房费', '押金', '商品售卖', '其他收入', '其他'])
+const expenseCategoryNames = new Set(['退款', '采购', '水电', '维修', '工资', '平台佣金', '其他支出', '其他'])
+const paymentMethods = computed(() => businessDictionaries.values('hotel_payment_method'))
+const totalRooms = computed(() => Math.max(1, Number(businessDictionaries.setting('hotel_setting', '总房量', '100')) || 100))
 const linkedYear = Number(route.query.financialYear || 0)
 const linkedMonth = Number(route.query.financialMonth || 0)
 const linkedPeriodKey = linkedYear > 0 && linkedMonth >= 1 && linkedMonth <= 12 ? `${linkedYear}${String(linkedMonth).padStart(2, '0')}` : ''
@@ -59,28 +64,39 @@ const dailyRecords = ref<DailyRecord[]>([])
 const loading = ref(false)
 const saving = ref(false)
 const entryModalOpen = ref(false)
+const detailOpen = ref(false)
+const detailRecord = ref<RevenueRecord>()
+const editingRecordId = ref('')
 const dailyForm = reactive({ occupiedRooms: 0, remark: '' })
-const formData = reactive<Omit<RevenueRecord, 'id' | 'date'>>({
-  time: dayjs().format('HH:mm'),
+const entryDailyForm = reactive({ occupiedRooms: 0, remark: '' })
+const formData = reactive<Omit<RevenueRecord, 'id'>>({
+  date: selectedDate.value,
   type: '收入',
   category: '房费',
   amount: 0,
   paymentMethod: '现金',
-  roomOrOrderNo: '',
   handler: '',
   remark: '',
 })
+const categoriesForType = computed(() => {
+  const names = formData.type === '收入' ? incomeCategoryNames : expenseCategoryNames
+  const filtered = categories.value.filter(item => names.has(item))
+  return filtered.length ? filtered : categories.value
+})
+watch(() => formData.type, () => {
+  if (!categoriesForType.value.includes(formData.category))
+    formData.category = categoriesForType.value[0] || ''
+})
 
 const columns = [
-  { title: '时间', dataIndex: 'time', width: 88 },
+  { title: '日期', dataIndex: 'date', width: 112 },
   { title: '类型', dataIndex: 'type', width: 84 },
   { title: '分类', dataIndex: 'category', width: 108 },
   { title: '金额', dataIndex: 'amount', width: 120 },
   { title: '支付方式', dataIndex: 'paymentMethod', width: 112 },
-  { title: '房号或订单号', dataIndex: 'roomOrOrderNo', width: 150 },
   { title: '经手人', dataIndex: 'handler', width: 104 },
   { title: '备注', dataIndex: 'remark', ellipsis: true },
-  { title: '操作', dataIndex: 'action', width: 72, fixed: 'right' as const },
+  { title: '操作', dataIndex: 'action', width: 108, fixed: 'right' as const },
 ]
 const tableColumns = computed(() => enhanceBusinessTableColumns(columns))
 const tableScrollX = computed(() => createBusinessTableScrollX(tableColumns.value, 950))
@@ -89,17 +105,18 @@ const revenueChartContainer = ref<HTMLElement>()
 const occupancyChartContainer = ref<HTMLElement>()
 const revenueChart = shallowRef<Column>()
 const occupancyChart = shallowRef<Line>()
-const sortedRecords = computed(() => [...records.value].sort((a, b) => b.time.localeCompare(a.time)))
+const sortedRecords = computed(() => [...records.value].sort((a, b) => b.date.localeCompare(a.date)))
 const totalIncome = computed(() => sumByType(records.value, '收入'))
 const totalExpense = computed(() => sumByType(records.value, '支出'))
 const netIncome = computed(() => totalIncome.value - totalExpense.value)
 const roomRevenue = computed(() => records.value.reduce((total, item) => total + (item.type === '收入' && item.category === '房费' ? Number(item.amount || 0) : 0), 0))
 const incomeCount = computed(() => records.value.filter(item => item.type === '收入').length)
-const occupancyRate = computed(() => dailyForm.occupiedRooms / TOTAL_ROOMS * 100)
-const availableRooms = computed(() => TOTAL_ROOMS - dailyForm.occupiedRooms)
+const occupancyRate = computed(() => dailyForm.occupiedRooms / totalRooms.value * 100)
+const availableRooms = computed(() => totalRooms.value - dailyForm.occupiedRooms)
 const averageRoomRate = computed(() => dailyForm.occupiedRooms ? roomRevenue.value / dailyForm.occupiedRooms : 0)
+const revenuePerAvailableRoom = computed(() => totalRooms.value ? roomRevenue.value / totalRooms.value : 0)
 const averageIncome = computed(() => incomeCount.value ? totalIncome.value / incomeCount.value : 0)
-const paymentSummary = computed(() => paymentMethods.map(method => ({
+const paymentSummary = computed(() => paymentMethods.value.map(method => ({
   method,
   amount: records.value.reduce((total, item) => item.paymentMethod === method ? total + (item.type === '收入' ? item.amount : -item.amount) : total, 0),
 })))
@@ -115,7 +132,7 @@ const dailyReports = computed<DailyReport[]>(() => {
     return {
       date,
       occupiedRooms,
-      occupancyRate: occupiedRooms / TOTAL_ROOMS * 100,
+      occupancyRate: occupiedRooms / totalRooms.value * 100,
       roomRevenue: rooms,
       otherIncome: income - rooms,
       totalIncome: income,
@@ -217,10 +234,16 @@ function renderHistoryCharts() {
   }
 }
 
-function applyDailyRecord() {
-  const daily = dailyRecords.value.find(item => item.date === selectedDate.value)
+function applyDailyRecord(date = selectedDate.value) {
+  const daily = dailyRecords.value.find(item => item.date === date)
   dailyForm.occupiedRooms = daily?.occupiedRooms || 0
   dailyForm.remark = daily?.remark || ''
+}
+
+function applyEntryDailyRecord(date = formData.date) {
+  const daily = dailyRecords.value.find(item => item.date === date)
+  entryDailyForm.occupiedRooms = daily?.occupiedRooms || 0
+  entryDailyForm.remark = daily?.remark || ''
 }
 
 async function loadData() {
@@ -251,15 +274,16 @@ async function changeDate() {
   resetForm()
 }
 
-async function saveRecords(manageSaving = true, upsert: RevenueRecord[] = [], deleteIds: string[] = []) {
+async function saveRecords(date: string, manageSaving = true, upsert: RevenueRecord[] = [], deleteIds: string[] = []) {
   if (manageSaving)
     saving.value = true
   try {
-    const result = await usePut<RevenueRecord[]>('/hotel/revenue', { date: selectedDate.value, upsert, deleteIds })
+    const result = await usePut<RevenueRecord[]>('/hotel/revenue', { date, upsert, deleteIds })
     if (result.code !== 200)
       throw new Error(result.msg || '营业流水保存失败')
-    records.value = result.data || []
-    allRecords.value = [...records.value, ...allRecords.value.filter(item => item.date !== selectedDate.value)]
+    if (date === selectedDate.value)
+      records.value = result.data || []
+    allRecords.value = [...(result.data || []), ...allRecords.value.filter(item => item.date !== date)]
   }
   finally {
     if (manageSaving)
@@ -267,36 +291,65 @@ async function saveRecords(manageSaving = true, upsert: RevenueRecord[] = [], de
   }
 }
 
-async function persistDaily() {
+async function persistDaily(date: string, input = dailyForm) {
   const result = await usePut<DailyRecord>('/hotel/daily', {
-    date: selectedDate.value,
-    totalRooms: TOTAL_ROOMS,
-    occupiedRooms: dailyForm.occupiedRooms,
-    remark: dailyForm.remark,
+    date,
+    totalRooms: totalRooms.value,
+    occupiedRooms: input.occupiedRooms,
+    remark: input.remark,
   })
   if (result.code !== 200)
     throw new Error(result.msg || '每日房态保存失败')
   if (!result.data)
     throw new Error('每日房态保存结果为空')
-  dailyRecords.value = [result.data, ...dailyRecords.value.filter(item => item.date !== selectedDate.value)]
+  dailyRecords.value = [result.data, ...dailyRecords.value.filter(item => item.date !== date)]
 }
 
 function resetForm() {
   Object.assign(formData, {
-    time: dayjs().format('HH:mm'),
+    date: selectedDate.value,
     type: '收入',
     category: '房费',
     amount: 0,
     paymentMethod: '现金',
-    roomOrOrderNo: '',
     handler: '',
     remark: '',
   })
 }
 
 function openEntryModal() {
+  editingRecordId.value = ''
   resetForm()
+  applyEntryDailyRecord(selectedDate.value)
   entryModalOpen.value = true
+}
+
+function openEditModal(record: RevenueRecord) {
+  editingRecordId.value = record.id
+  Object.assign(formData, {
+    date: record.date,
+    type: record.type,
+    category: record.category,
+    amount: record.amount,
+    paymentMethod: record.paymentMethod,
+    handler: record.handler,
+    remark: record.remark,
+  })
+  applyEntryDailyRecord(record.date)
+  entryModalOpen.value = true
+}
+
+function openDetail(record: RevenueRecord) {
+  detailRecord.value = record
+  detailOpen.value = true
+}
+
+function editDetailRecord() {
+  if (!detailRecord.value)
+    return
+  const record = detailRecord.value
+  detailOpen.value = false
+  openEditModal(record)
 }
 
 function closeEntryModal() {
@@ -304,32 +357,43 @@ function closeEntryModal() {
     entryModalOpen.value = false
 }
 
-async function addRecord() {
-  if (!formData.time)
-    return message.warning('请选择时间')
+async function saveRecord() {
+  if (saving.value)
+    return
+  if (!formData.date)
+    return message.warning('请选择日期')
   if (!formData.amount || Number(formData.amount) <= 0)
     return message.warning('请输入大于 0 的金额')
   if (!formData.handler.trim())
     return message.warning('请输入经手人')
+  if (entryDailyForm.occupiedRooms < 0 || entryDailyForm.occupiedRooms > totalRooms.value)
+    return message.warning(`入住房间应在 0 至 ${totalRooms.value} 之间`)
   const previous = records.value
+  const originalDate = editingRecordId.value
+    ? records.value.find(item => item.id === editingRecordId.value)?.date || selectedDate.value
+    : ''
+  const recordDate = formData.date
   const nextRecord: RevenueRecord = {
-    id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
-    date: selectedDate.value,
+    id: editingRecordId.value || `${Date.now()}-${Math.random().toString(16).slice(2)}`,
     ...formData,
     amount: Number(formData.amount),
-    roomOrOrderNo: formData.roomOrOrderNo.trim(),
     handler: formData.handler.trim(),
     remark: formData.remark.trim(),
   }
   saving.value = true
   try {
-    if (formData.type === '收入')
-      await persistDaily()
-    records.value = [nextRecord, ...records.value]
-    await saveRecords(false, [nextRecord])
+    await saveRecords(recordDate, false, [nextRecord])
+    if (originalDate && originalDate !== recordDate)
+      await saveRecords(originalDate, false, [], [nextRecord.id])
+    await persistDaily(recordDate, entryDailyForm)
+    const wasEditing = Boolean(editingRecordId.value)
+    editingRecordId.value = ''
     resetForm()
     entryModalOpen.value = false
-    message.success('流水已新增')
+    if (selectedDate.value !== recordDate)
+      selectedDate.value = recordDate
+    message.success(wasEditing ? '流水已更新' : '流水已新增')
+    await loadData()
   }
   catch (error: any) {
     records.value = previous
@@ -344,7 +408,7 @@ async function removeRecord(record: RevenueRecord) {
   const previous = records.value
   records.value = records.value.filter(item => item.id !== record.id)
   try {
-    await saveRecords(true, [], [record.id])
+    await saveRecords(record.date, true, [], [record.id])
     message.success('流水已删除')
   }
   catch (error: any) {
@@ -375,8 +439,8 @@ function exportDailyCsv() {
   if (!records.value.length)
     return message.warning('当前日期暂无可导出的流水')
   downloadCsv(`酒店营业收支_${selectedDate.value}.csv`, [
-    ['日期', '时间', '类型', '分类', '金额', '支付方式', '房号或订单号', '经手人', '备注'],
-    ...sortedRecords.value.map(item => [item.date, item.time, item.type, item.category, item.amount.toFixed(2), item.paymentMethod, item.roomOrOrderNo, item.handler, item.remark]),
+    ['日期', '类型', '分类', '金额', '支付方式', '经手人', '备注'],
+    ...sortedRecords.value.map(item => [item.date, item.type, item.category, item.amount.toFixed(2), item.paymentMethod, item.handler, item.remark]),
   ])
 }
 
@@ -385,7 +449,7 @@ function exportReportCsv() {
     return message.warning('暂无可导出的日报')
   downloadCsv('酒店经营日报.csv', [
     ['营业日期', '入住房间', '总房间', '入住率', '房费收入', '其他收入', '总收入', '总支出', '净收入', '平均房价'],
-    ...dailyReports.value.map(item => [item.date, item.occupiedRooms, TOTAL_ROOMS, `${item.occupancyRate.toFixed(1)}%`, item.roomRevenue.toFixed(2), item.otherIncome.toFixed(2), item.totalIncome.toFixed(2), item.totalExpense.toFixed(2), item.netIncome.toFixed(2), item.averageRoomRate.toFixed(2)]),
+    ...dailyReports.value.map(item => [item.date, item.occupiedRooms, totalRooms.value, `${item.occupancyRate.toFixed(1)}%`, item.roomRevenue.toFixed(2), item.otherIncome.toFixed(2), item.totalIncome.toFixed(2), item.totalExpense.toFixed(2), item.netIncome.toFixed(2), item.averageRoomRate.toFixed(2)]),
   ])
 }
 
@@ -395,9 +459,12 @@ watch([visibleDailyReports, historyRange], async () => {
 }, { deep: true, flush: 'post' })
 
 onMounted(async () => {
+  await businessDictionaries.load()
   await loadData()
   await nextTick()
   renderHistoryCharts()
+  if (route.query.action === 'create')
+    openEntryModal()
 })
 
 onBeforeUnmount(() => {
@@ -415,6 +482,9 @@ onBeforeUnmount(() => {
           <p>按营业日登记房态与收支，统一查看入住率、平均房价和经营结果。</p>
         </div>
         <a-space wrap>
+          <a-button type="primary" @click="openEntryModal">
+            <PlusOutlined />流水与房态录入
+          </a-button>
           <a-button @click="exportDailyCsv">
             <template #icon>
               <DownloadOutlined />
@@ -434,7 +504,7 @@ onBeforeUnmount(() => {
           <a-date-picker v-model:value="selectedDate" value-format="YYYY-MM-DD" :allow-clear="false" @change="changeDate" />
         </div>
         <div class="date-context">
-          房态随收入流水一并保存，当前酒店总房量固定为 {{ TOTAL_ROOMS }} 间。
+          新增流水时可同步登记当日入住数，当前酒店总房量为 {{ totalRooms }} 间。
         </div>
       </section>
 
@@ -453,6 +523,9 @@ onBeforeUnmount(() => {
         </div>
         <div class="metric-item">
           <span>平均房价</span><strong>{{ formatMoney(averageRoomRate) }}</strong><small>房费收入 ÷ 入住房间</small>
+        </div>
+        <div class="metric-item">
+          <span>单房收益</span><strong>{{ formatMoney(revenuePerAvailableRoom) }}</strong><small>房费收入 ÷ 可售房总数</small>
         </div>
         <div class="metric-item">
           <span>总收入</span><strong>{{ formatMoney(totalIncome) }}</strong><small>平均每笔 {{ formatMoney(averageIncome) }}</small>
@@ -515,7 +588,7 @@ onBeforeUnmount(() => {
             </div>
             <div class="chart-panel">
               <div class="chart-title">
-                <strong>入住率趋势</strong><span>每日已住房间占 100 间总房量的比例</span>
+                <strong>入住率趋势</strong><span>每日已住房间占 {{ totalRooms }} 间总房量的比例</span>
               </div>
               <div ref="occupancyChartContainer" class="history-chart" />
             </div>
@@ -547,11 +620,25 @@ onBeforeUnmount(() => {
               <span :class="record.type === '收入' ? 'income-text' : 'expense-text'">{{ formatMoney(record.amount) }}</span>
             </template>
             <template v-else-if="column.dataIndex === 'action'">
-              <a-popconfirm title="确定删除这笔流水吗？" ok-type="danger" ok-text="删除" cancel-text="取消" @confirm="removeTableRecord(record)">
-                <a-button type="text" danger aria-label="删除流水">
-                  <DeleteOutlined />
-                </a-button>
-              </a-popconfirm>
+              <a-space :size="4">
+                <a-tooltip title="查看流水">
+                  <a-button type="text" aria-label="查看流水" @click="openDetail(record as RevenueRecord)">
+                    <EyeOutlined />
+                  </a-button>
+                </a-tooltip>
+                <a-tooltip title="编辑流水">
+                  <a-button type="text" aria-label="编辑流水" @click="openEditModal(record as RevenueRecord)">
+                    <EditOutlined />
+                  </a-button>
+                </a-tooltip>
+                <a-popconfirm title="确定删除这笔流水吗？" ok-type="danger" ok-text="删除" cancel-text="取消" @confirm="removeTableRecord(record)">
+                  <a-tooltip title="删除流水">
+                    <a-button type="text" danger aria-label="删除流水">
+                      <DeleteOutlined />
+                    </a-button>
+                  </a-tooltip>
+                </a-popconfirm>
+              </a-space>
             </template>
             <template v-else>
               <a-tooltip :title="displayBusinessTableValue(getBusinessTableValue(record, column.dataIndex))">
@@ -564,37 +651,38 @@ onBeforeUnmount(() => {
 
       <a-modal
         v-model:open="entryModalOpen"
-        title="新增流水"
+        :title="editingRecordId ? '编辑流水' : '新增流水'"
         :width="720"
         :mask-closable="!saving"
         :closable="!saving"
         :keyboard="!saving"
         :confirm-loading="saving"
+        :cancel-button-props="{ disabled: saving }"
         ok-text="保存流水"
         cancel-text="取消"
-        @ok="addRecord"
+        @ok="saveRecord"
         @cancel="closeEntryModal"
       >
         <p class="modal-description">
-          录入 {{ selectedDate }} 的收入或支出，带 * 项为必填。
+          {{ editingRecordId ? '更正' : '录入' }} {{ formData.date }} 的收入或支出，带 * 项为必填。
         </p>
         <a-form layout="vertical" class="entry-form">
           <div class="form-grid">
-            <a-form-item label="时间" required>
-              <a-time-picker v-model:value="formData.time" value-format="HH:mm" format="HH:mm" />
+            <a-form-item label="日期" required>
+              <a-date-picker v-model:value="formData.date" value-format="YYYY-MM-DD" format="YYYY-MM-DD" placeholder="请输入日期" :allow-clear="false" @change="applyEntryDailyRecord(formData.date)" />
             </a-form-item>
             <a-form-item label="类型" required>
               <a-segmented v-model:value="formData.type" :options="['收入', '支出']" block />
             </a-form-item>
             <a-form-item label="分类" required>
-              <a-select v-model:value="formData.category">
-                <a-select-option v-for="item in categories" :key="item" :value="item">
+              <a-select v-model:value="formData.category" :placeholder="formData.type === '收入' ? '请选择收入分类' : '请选择支出分类'">
+                <a-select-option v-for="item in categoriesForType" :key="item" :value="item">
                   {{ item }}
                 </a-select-option>
               </a-select>
             </a-form-item>
             <a-form-item label="金额" required>
-              <a-input-number v-model:value="formData.amount" :min="0" :precision="2" placeholder="0.00" />
+              <business-input-number v-model:value="formData.amount" :min="0" :precision="2" placeholder="0.00" />
             </a-form-item>
             <a-form-item label="支付方式" required>
               <a-select v-model:value="formData.paymentMethod">
@@ -603,33 +691,68 @@ onBeforeUnmount(() => {
                 </a-select-option>
               </a-select>
             </a-form-item>
-            <a-form-item label="房号或订单号">
-              <a-input v-model:value="formData.roomOrOrderNo" placeholder="例如 301 / OTA订单号" />
-            </a-form-item>
             <a-form-item label="经手人" required>
               <a-input v-model:value="formData.handler" placeholder="请输入经手人" />
             </a-form-item>
             <a-form-item label="备注">
-              <a-input v-model:value="formData.remark" placeholder="选填" @press-enter="addRecord" />
+              <a-input v-model:value="formData.remark" placeholder="选填" @press-enter="saveRecord" />
             </a-form-item>
-            <div v-if="formData.type === '收入'" class="room-state-fields">
+            <div class="room-state-fields">
               <div class="conditional-heading">
                 <strong>当日房态</strong>
-                <span>保存收入流水时同步更新 {{ selectedDate }} 的房态</span>
+                <span>与本笔流水使用同一营业日期</span>
               </div>
               <a-form-item label="入住房间" required>
                 <div class="room-input-row">
-                  <a-input-number v-model:value="dailyForm.occupiedRooms" :min="0" :max="TOTAL_ROOMS" :precision="0" />
-                  <span class="room-capacity">/ {{ TOTAL_ROOMS }} 间</span>
+                  <business-input-number v-model:value="entryDailyForm.occupiedRooms" :min="0" :max="totalRooms" :precision="0" />
+                  <span class="room-capacity">/ {{ totalRooms }} 间</span>
                 </div>
               </a-form-item>
               <a-form-item label="房态备注">
-                <a-input v-model:value="dailyForm.remark" :maxlength="500" placeholder="选填，例如停用房、团队入住等" />
+                <a-input v-model:value="entryDailyForm.remark" :maxlength="500" placeholder="例如停用房、团队入住等" />
               </a-form-item>
             </div>
           </div>
         </a-form>
       </a-modal>
+
+      <BusinessDetailDrawer
+        v-model:open="detailOpen"
+        :title="detailRecord ? `${detailRecord.date} ${detailRecord.type}` : '酒店流水详情'"
+        :subtitle="detailRecord ? detailRecord.category : ''"
+        :status="detailRecord?.type"
+        :status-color="detailRecord?.type === '收入' ? 'success' : 'error'"
+        :width="680"
+      >
+        <a-descriptions v-if="detailRecord" title="流水信息" bordered :column="2" size="small">
+          <a-descriptions-item label="营业日期">
+            {{ detailRecord.date }}
+          </a-descriptions-item>
+          <a-descriptions-item label="收支分类">
+            {{ detailRecord.category }}
+          </a-descriptions-item>
+          <a-descriptions-item label="金额">
+            <strong :class="detailRecord.type === '收入' ? 'income-text' : 'expense-text'">{{ formatMoney(detailRecord.amount) }}</strong>
+          </a-descriptions-item>
+          <a-descriptions-item label="支付方式">
+            {{ detailRecord.paymentMethod }}
+          </a-descriptions-item>
+          <a-descriptions-item label="经手人">
+            {{ detailRecord.handler || '-' }}
+          </a-descriptions-item>
+          <a-descriptions-item label="备注">
+            {{ detailRecord.remark || '-' }}
+          </a-descriptions-item>
+        </a-descriptions>
+        <template v-if="detailRecord" #footer>
+          <a-button @click="detailOpen = false">
+            关闭
+          </a-button>
+          <a-button type="primary" @click="editDetailRecord">
+            编辑流水
+          </a-button>
+        </template>
+      </BusinessDetailDrawer>
     </div>
   </page-container>
 </template>

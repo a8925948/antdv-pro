@@ -13,6 +13,7 @@ export interface ImportConfirmState {
   fileName: string
   fileSize: number
   fileSizeText: string
+  summaryNo?: string
   totalRecords: number
   validRecords: number
   errorRecords: number

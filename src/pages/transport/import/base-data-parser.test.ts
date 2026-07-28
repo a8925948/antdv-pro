@@ -12,6 +12,18 @@ describe('transport base data parser', () => {
     expect(createBaseImportFieldMap({ key: 'route', columns }, columns).get('客户名称')).toBe('customer')
   })
 
+  it('maps loading and unloading coordinate aliases', () => {
+    const columns = [
+      { title: '装货地经度', dataIndex: 'loadingLongitude' },
+      { title: '装货地纬度', dataIndex: 'loadingLatitude' },
+      { title: '卸货地经度', dataIndex: 'unloadingLongitude' },
+      { title: '卸货地纬度', dataIndex: 'unloadingLatitude' },
+    ]
+    const fieldMap = createBaseImportFieldMap({ key: 'route', columns }, columns)
+    expect(fieldMap.get('装车经度')).toBe('loadingLongitude')
+    expect(fieldMap.get('卸车纬度')).toBe('unloadingLatitude')
+  })
+
   it('prefers the crew detail sheet and parses grouped driver and escort fields', () => {
     const fieldMap = createBaseImportFieldMap(
       { key: 'crew', columns: [] },

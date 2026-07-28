@@ -3,38 +3,24 @@
 /* eslint-disable regexp/no-super-linear-backtracking, regexp/no-misleading-capturing-group, regexp/no-obscure-range, regexp/optimal-lookaround-quantifier -- bounded PDF text uses domain-specific invoice patterns */
 import type { Ref } from 'vue'
 import type { GpsGeofence, GpsLocationLatest } from '~@/api/gps'
+import type { TransportFuelCreatePayload } from '~@/api/transport/fuel'
 import type { TransportSummaryCard } from '~@/api/transport/summary'
 import type { RecordActionItem } from '~@/components/record-actions/index.vue'
 import type { ImportTableColumn } from '~@/types/import'
 import type { TransportImportKind, TransportOrderForm } from './composables/use-transport-module-state'
+import { FolderOpenOutlined } from '@ant-design/icons-vue'
 import dayjs from 'dayjs'
-import * as XLSX from 'xlsx'
+import { cloneDeep } from 'lodash-es'
+import { defineAsyncComponent } from 'vue'
 import { getApprovalInstancesApi, submitApprovalApi } from '~@/api/approval'
 import { geocodeGpsAddressApi, getGpsGeofencesApi, getGpsLatestLocationsApi, syncGpsRouteGeofencesApi } from '~@/api/gps'
+import { createTransportFuelRecordApi, importTransportFuelApi } from '~@/api/transport/fuel'
 import { getTransportModuleSummaryApi } from '~@/api/transport/summary'
 import FinancialPeriodFilter from '~@/components/financial-period-filter/index.vue'
-import ImportConfirmDialog from '~@/components/import-confirm-dialog/index.vue'
 import SummaryCards from '~@/components/summary-cards/index.vue'
 import { useFinancialPeriodFilter } from '~@/composables/financial-period-filter'
-import { displayGpsLocation, findNearbyGpsFence, queueGpsChineseAddresses } from '~@/composables/gps-location-address'
-import {
-  calculateCustomerBidBalance,
-  flushTransportOperationData,
-  loadTransportOperationData,
-  syncDriverPayrollFromBaseData,
-  syncTransportCustomersFromOrders,
-  syncTransportRoutesFromOrders,
-  transportBaseCrewRows,
-  transportBaseCustomerRows,
-  transportBaseRouteRows,
-  transportBaseVehicleRows,
-  transportDriverPayrollRows,
-  transportEtcRows,
-  transportFuelRows,
-  transportOperationError,
-  transportOperationLoading,
-  transportOrderRows,
-} from '~@/composables/transport-operation-data'
+import { displayGpsLocation, filterGpsFencesForRoute, findNearbyGpsFence, queueGpsChineseAddresses, resolveGpsRouteStageByAddress } from '~@/composables/gps-location-address'
+import { calculateCustomerBidBalance, flushTransportOperationData, loadTransportOperationData, syncDriverPayrollFromBaseData, syncTransportCustomersFromOrders, transportBaseCompanyRows, transportBaseCrewRows, transportBaseCustomerRows, transportBaseRouteRows, transportBaseVehicleRows, transportDriverPayrollRows, transportEtcRows, transportFuelRows, transportOperationError, transportOperationLoading, transportOrderRows } from '~@/composables/transport-operation-data'
 import { createBusinessTableScrollX } from '~@/utils/business-table'
 import {
   financialMonthKey,
@@ -43,30 +29,42 @@ import {
   getFinancialMonthByDate,
   parseFinancialMonthKey,
 } from '~@/utils/financialPeriod'
-import {
-  getImportStatusText,
-  setImportParsingState,
-  setImportPendingState,
-} from '~@/utils/import-progress'
+import { getImportStatusText, setImportParsingState, setImportPendingState } from '~@/utils/import-progress'
 import { normalizeTransportDate } from '~@/utils/transport-date'
-import { calculateTransportFreight, calculateTransportFreightExcludingTax, getTransportFreightFormula, isFeeInClosingOrderPeriod, mergeTransportRecords, requiresTransportCrewBinding } from '~@/utils/transport-operation'
-import { extractTransportPdfText, parseTransportWorkbook } from '~@/workers/transport-import-client'
-import BaseDataModal from './components/base-data-modal.vue'
-import BaseDataTable from './components/base-data-table.vue'
-import DriverModeModal from './components/driver-mode-modal.vue'
-import DriverPayrollTable from './components/driver-payroll-table.vue'
-import TransportRecordsTable from './components/transport-records-table.vue'
+import { calculateTransportFreight, calculateTransportFreightExcludingTax, getTransportFreightFormula, isFeeInClosingOrderPeriod, mergeTransportRecords } from '~@/utils/transport-operation'
+import { extractTransportPdfText, getTransportFileContentHash, parseTransportWorkbook } from '~@/workers/transport-import-client'
 import { createEmptyTransportOrderForm, useTransportModuleState } from './composables/use-transport-module-state'
 import { createBaseImportFieldMap, createStableImportCode, normalizeImportHeader, parseCrewImportRows, selectBaseImportSheet } from './import/base-data-parser'
-import { extractEtcRoutePair, normalizeEtcRecord, normalizeEtcRouteName, normalizeEtcRows } from './import/etc-parser'
+import { extractEtcRoutePair, formatEtcAmountFromCents, normalizeEtcRecord, normalizeEtcRouteName, normalizeEtcRows, parseEtcAmountInCents } from './import/etc-parser'
+import { parseEtcSummaryInvoiceStrict } from './import/etc-summary-parser'
 import { formatFuelAmount, normalizeFuelRows, parseFuelDate } from './import/fuel-parser'
 import { decorateOrderRecord, formatOrderWeight, matrixToRecords, normalizeFinanceMonth, normalizeOrderRows, readOrderRowsFromMatrix } from './import/order-parser'
+import { decorateEtcRoutes } from './utils/etc-route-matcher'
+import { normalizeRouteCoordinateAddress, validRouteCoordinatePair } from './utils/route-coordinate'
+
+const ImportConfirmDialog = defineAsyncComponent(() => import('~@/components/import-confirm-dialog/index.vue'))
+const BaseDataModal = defineAsyncComponent(() => import('./components/base-data-modal.vue'))
+const BaseDataTable = defineAsyncComponent(() => import('./components/base-data-table.vue'))
+const DriverModeModal = defineAsyncComponent(() => import('./components/driver-mode-modal.vue'))
+const DriverPayrollTable = defineAsyncComponent(() => import('./components/driver-payroll-table.vue'))
+const TransportOrderAnalytics = defineAsyncComponent(() => import('./components/transport-order-analytics.vue'))
+const TransportOperationCreateModal = defineAsyncComponent(() => import('./components/transport-operation-create-modal.vue'))
+const TransportRecordDetailDrawer = defineAsyncComponent(() => import('./components/transport-record-detail-drawer.vue'))
+const TransportRecordsTable = defineAsyncComponent(() => import('./components/transport-records-table.vue'))
+const TransportSubmoduleAnalytics = defineAsyncComponent(() => import('./components/transport-submodule-analytics.vue'))
 
 const route = useRoute()
 const router = useRouter()
 const message = useMessage()
+const batchFolderInput = ref<HTMLInputElement>()
+const manualRecordOpen = ref(false)
+const manualRecordSaving = ref(false)
 const orderGpsLocations = ref<GpsLocationLatest[]>([])
 const orderGpsGeofences = ref<GpsGeofence[]>([])
+
+function loadXlsx() {
+  return import('xlsx')
+}
 
 function normalizeGpsPlateNo(value: unknown) {
   return String(value ?? '').toUpperCase().replace(/[\s·•\-]/g, '')
@@ -79,7 +77,15 @@ function getOrderGpsLocation(record: Record<string, string>) {
 }
 
 function getOrderGpsLocationLabel(record: Record<string, string>) {
-  return displayGpsLocation(getOrderGpsLocation(record), orderGpsGeofences.value) || '暂无定位'
+  return displayGpsLocation(getOrderGpsLocation(record), getOrderGpsGeofences(record)) || '暂无定位'
+}
+
+function getOrderGpsGeofences(record: Record<string, any>) {
+  return filterGpsFencesForRoute(orderGpsGeofences.value, findRouteFence(record))
+}
+
+function getNearbyOrderGpsFence(record: Record<string, any>) {
+  return findNearbyGpsFence(getOrderGpsLocation(record), getOrderGpsGeofences(record))
 }
 
 const latestOrderCodeByPlate = computed(() => {
@@ -119,6 +125,7 @@ interface FuelRecord extends Record<string, string> {
   location: string
   product: string
   quantity: string
+  quantityUnit: 'L' | 'kg'
   amount: string
   driver: string
 }
@@ -134,6 +141,7 @@ interface FuelSummary {
 
 interface EtcRecord extends Record<string, string> {
   code: string
+  summaryNo: string
   name: string
   owner: string
   status: string
@@ -276,7 +284,7 @@ const moduleProfiles: Record<string, {
     secondaryMetric: '待核对',
     amountMetric: 'ETC费用',
     columns: [
-      { title: '流水号', dataIndex: 'code', width: 150, align: 'center' },
+      { title: '汇总单号', dataIndex: 'summaryNo', width: 210, align: 'center' },
       { title: '通行日期', dataIndex: 'updatedAt', width: 130, align: 'center' },
       { title: '入口信息', dataIndex: 'entryInfo', width: 190 },
       { title: '出口信息', dataIndex: 'exitInfo', width: 190 },
@@ -333,6 +341,7 @@ const moduleProfiles: Record<string, {
       { title: '财务月', dataIndex: 'financeMonth' },
       { title: '薪资模式', dataIndex: 'salaryMode' },
       { title: '模式金额', dataIndex: 'modeAmount' },
+      { title: '薪资构成', dataIndex: 'salaryComposition', width: 210 },
       { title: '出勤天数', dataIndex: 'attendanceDays' },
       { title: '今日考勤', dataIndex: 'todayAttendance' },
       { title: '运输趟次', dataIndex: 'tripCount' },
@@ -393,11 +402,17 @@ const baseDataTabs: BaseDataTab[] = [
       { title: '公司编号', dataIndex: 'code' },
       { title: '公司名称', dataIndex: 'name' },
       { title: '统一社会信用代码', dataIndex: 'taxNo' },
-      { title: '联系人', dataIndex: 'contact' },
+      { title: '道路运输许可证号', dataIndex: 'licenseNo' },
+      { title: '法人', dataIndex: 'legalRepresentative' },
+      { title: '联系方式', dataIndex: 'contactPhone' },
+      { title: '营业执照', dataIndex: 'businessLicenseName' },
+      { title: '营业执照有效期', dataIndex: 'businessLicenseValidTo' },
+      { title: '道路运输许可证附件', dataIndex: 'roadTransportLicenseName' },
+      { title: '道路运输许可证有效期', dataIndex: 'roadTransportLicenseValidTo' },
       { title: '状态', dataIndex: 'status' },
       { title: '更新时间', dataIndex: 'updatedAt' },
     ],
-    rows: [],
+    rows: transportBaseCompanyRows.value,
   },
   {
     key: 'customer',
@@ -421,16 +436,20 @@ const baseDataTabs: BaseDataTab[] = [
     key: 'vehicle',
     title: '车辆信息',
     columns: [
-      { title: '车号', dataIndex: 'code' },
-      { title: '所在地区', dataIndex: 'area' },
-      { title: '燃料类型', dataIndex: 'fuelType' },
-      { title: '司机/押运员', dataIndex: 'driver' },
-      { title: '状态', dataIndex: 'status' },
-      { title: '总里程', dataIndex: 'mileage' },
-      { title: '购买日期', dataIndex: 'purchaseDate' },
-      { title: '车辆年限', dataIndex: 'vehicleAgeType' },
-      { title: '报废日期', dataIndex: 'scrapDate' },
-      { title: '更新时间', dataIndex: 'updatedAt' },
+      { title: '车号', dataIndex: 'code', width: 116, fixed: 'left' },
+      { title: '所在地区', dataIndex: 'area', width: 92 },
+      { title: '燃料类型', dataIndex: 'fuelType', width: 92 },
+      { title: '道路运输证号', dataIndex: 'roadTransportCertificateNo', width: 140 },
+      { title: '挂车道路运输证号', dataIndex: 'trailerRoadTransportCertificateNo', width: 152 },
+      { title: '罐体编号', dataIndex: 'tankNo', width: 112 },
+      { title: '罐体容积(m³)', dataIndex: 'tankVolume', width: 120, align: 'right' },
+      { title: '司机/押运员', dataIndex: 'driver', width: 124 },
+      { title: '状态', dataIndex: 'status', width: 92 },
+      { title: '总里程', dataIndex: 'mileage', width: 92, align: 'right' },
+      { title: '购买日期', dataIndex: 'purchaseDate', width: 108, align: 'center' },
+      { title: '车辆年限', dataIndex: 'vehicleAgeType', width: 104, align: 'center' },
+      { title: '报废日期', dataIndex: 'scrapDate', width: 108, align: 'center' },
+      { title: '更新时间', dataIndex: 'updatedAt', width: 120, align: 'center' },
     ],
     rows: transportBaseVehicleRows.value,
   },
@@ -450,38 +469,34 @@ const baseDataTabs: BaseDataTab[] = [
     key: 'route',
     title: '路线信息',
     columns: [
-      { title: '路线编号', dataIndex: 'code' },
-      { title: '客户名称', dataIndex: 'customer' },
-      { title: '路线名称', dataIndex: 'name' },
-      { title: '装货地', dataIndex: 'loadingAddress' },
-      { title: '装货地经度', dataIndex: 'loadingLongitude' },
-      { title: '装货地纬度', dataIndex: 'loadingLatitude' },
-      { title: '目的地', dataIndex: 'destinationName' },
-      { title: '目的地行政区域', dataIndex: 'destinationArea' },
-      { title: '卸货地', dataIndex: 'unloadingAddress' },
-      { title: '卸货地经度', dataIndex: 'unloadingLongitude' },
-      { title: '卸货地纬度', dataIndex: 'unloadingLatitude' },
-      { title: '运距', dataIndex: 'distance' },
-      { title: '运价', dataIndex: 'freightPrice' },
-      { title: '单程新车天然气计划油耗(kg)', dataIndex: 'newGasVehiclePlannedFuelConsumption' },
-      { title: '单程旧车天然气计划油耗(kg)', dataIndex: 'oldGasVehiclePlannedFuelConsumption' },
-      { title: '单程新车柴油计划油耗(L)', dataIndex: 'newDieselVehiclePlannedFuelConsumption' },
-      { title: '单程旧车柴油计划油耗(L)', dataIndex: 'oldDieselVehiclePlannedFuelConsumption' },
-      { title: '往返新车天然气计划油耗(kg)', dataIndex: 'roundTripNewGasVehiclePlannedFuelConsumption' },
-      { title: '往返旧车天然气计划油耗(kg)', dataIndex: 'roundTripOldGasVehiclePlannedFuelConsumption' },
-      { title: '往返新车柴油计划油耗(L)', dataIndex: 'roundTripNewDieselVehiclePlannedFuelConsumption' },
-      { title: '往返旧车柴油计划油耗(L)', dataIndex: 'roundTripOldDieselVehiclePlannedFuelConsumption' },
-      { title: '差费', dataIndex: 'extraFee' },
-      { title: '装车电子围栏', dataIndex: 'loadingFenceName' },
-      { title: '装车围栏范围', dataIndex: 'loadingFenceRadius' },
-      { title: '运输中电子围栏', dataIndex: 'transitFenceName' },
-      { title: '卸车电子围栏', dataIndex: 'unloadingFenceName' },
-      { title: '卸车围栏范围', dataIndex: 'unloadingFenceRadius' },
-      { title: '空返电子围栏', dataIndex: 'returnFenceName' },
-      { title: '状态', dataIndex: 'status' },
-      { title: '路线时效', dataIndex: 'routeValidityType' },
-      { title: '时间范围', dataIndex: 'routeValidityRange' },
-      { title: '更新时间', dataIndex: 'updatedAt' },
+      { title: '路线编号', dataIndex: 'code', width: 104, fixed: 'left' },
+      { title: '客户名称', dataIndex: 'customer', width: 168, fixed: 'left' },
+      { title: '路线名称', dataIndex: 'name', width: 260 },
+      { title: '装货地', dataIndex: 'loadingAddress', width: 220 },
+      { title: '目的地', dataIndex: 'destinationName', width: 220 },
+      { title: '目的地行政区域', dataIndex: 'destinationArea', width: 160 },
+      { title: '卸货地', dataIndex: 'unloadingAddress', width: 220 },
+      { title: '运距', dataIndex: 'distance', width: 88, align: 'right' },
+      { title: '运价', dataIndex: 'freightPrice', width: 96, align: 'right' },
+      { title: '单程新车天然气计划油耗(kg)', dataIndex: 'newGasVehiclePlannedFuelConsumption', width: 148, align: 'right' },
+      { title: '单程旧车天然气计划油耗(kg)', dataIndex: 'oldGasVehiclePlannedFuelConsumption', width: 148, align: 'right' },
+      { title: '单程新车柴油计划油耗(L)', dataIndex: 'newDieselVehiclePlannedFuelConsumption', width: 148, align: 'right' },
+      { title: '单程旧车柴油计划油耗(L)', dataIndex: 'oldDieselVehiclePlannedFuelConsumption', width: 148, align: 'right' },
+      { title: '往返新车天然气计划油耗(kg)', dataIndex: 'roundTripNewGasVehiclePlannedFuelConsumption', width: 148, align: 'right' },
+      { title: '往返旧车天然气计划油耗(kg)', dataIndex: 'roundTripOldGasVehiclePlannedFuelConsumption', width: 148, align: 'right' },
+      { title: '往返新车柴油计划油耗(L)', dataIndex: 'roundTripNewDieselVehiclePlannedFuelConsumption', width: 148, align: 'right' },
+      { title: '往返旧车柴油计划油耗(L)', dataIndex: 'roundTripOldDieselVehiclePlannedFuelConsumption', width: 148, align: 'right' },
+      { title: '差费', dataIndex: 'extraFee', width: 96, align: 'right' },
+      { title: '装车电子围栏', dataIndex: 'loadingFenceName', width: 160 },
+      { title: '装车围栏范围', dataIndex: 'loadingFenceRadius', width: 116 },
+      { title: '运输中电子围栏', dataIndex: 'transitFenceName', width: 160 },
+      { title: '卸车电子围栏', dataIndex: 'unloadingFenceName', width: 160 },
+      { title: '卸车围栏范围', dataIndex: 'unloadingFenceRadius', width: 116 },
+      { title: '空返电子围栏', dataIndex: 'returnFenceName', width: 160 },
+      { title: '状态', dataIndex: 'status', width: 92, align: 'center' },
+      { title: '路线时效', dataIndex: 'routeValidityType', width: 96, align: 'center' },
+      { title: '时间范围', dataIndex: 'routeValidityRange', width: 190, align: 'center' },
+      { title: '更新时间', dataIndex: 'updatedAt', width: 120, align: 'center' },
     ],
     rows: importedRouteRows,
   },
@@ -493,6 +508,10 @@ const fuelRows = transportFuelRows
 const fuelImportSummary = ref<FuelSummary | null>(null)
 const orderRows = transportOrderRows as Ref<TransportOrderRecord[]>
 const orderImportSummary = ref<OrderSummary | null>(null)
+const businessEditOpen = ref(false)
+const businessEditSaving = ref(false)
+const businessEditingRecord = ref<Record<string, string>>()
+const businessEditForm = reactive<Record<string, string>>({})
 const {
   orderModalOpen,
   editingOrderCode,
@@ -510,6 +529,7 @@ const {
   tablePagination,
   importPreview,
   pendingImportApply,
+  pendingImportPersist,
   batchFilePickerOpen,
   batchFilePickerKind,
   batchSelectedFiles,
@@ -524,18 +544,20 @@ async function ensureTransportOperationData() {
     message.error(transportOperationError.value)
 }
 
-onMounted(() => {
-  void ensureTransportOperationData()
+onMounted(async () => {
+  await ensureTransportOperationData()
+  void resolveMissingRouteCoordinates()
+  if (route.name === 'TransportOrders' && route.query.action === 'create')
+    openOrderModal()
 })
 
-type TransportStage = 'loading' | 'transit' | 'unloading' | 'returning' | 'completed'
+type TransportStage = 'loading' | 'transit' | 'unloading' | 'returning'
 
-const transportStageProfiles: Record<TransportStage, { label: string, color: string, fenceField: string }> = {
-  loading: { label: '装车', color: 'orange', fenceField: 'loadingFenceName' },
-  transit: { label: '运输中', color: 'blue', fenceField: 'transitFenceName' },
-  unloading: { label: '卸车', color: 'purple', fenceField: 'unloadingFenceName' },
-  returning: { label: '空返', color: 'cyan', fenceField: 'returnFenceName' },
-  completed: { label: '已完成', color: 'green', fenceField: '' },
+const transportStageProfiles: Record<TransportStage, { label: string, color: string }> = {
+  loading: { label: '装车', color: 'orange' },
+  transit: { label: '运输中', color: 'blue' },
+  unloading: { label: '卸车', color: 'purple' },
+  returning: { label: '空返', color: 'cyan' },
 }
 
 function normalizeRouteToken(value?: string) {
@@ -686,7 +708,7 @@ const activeProfile = computed(() => {
   const routeName = String(route.name ?? 'TransportOrders')
   return moduleProfiles[routeName] ?? moduleProfiles.TransportOrders
 })
-const sourceTableRows = computed(() => {
+const sourceTableRows = computed<Array<Record<string, string | undefined>>>(() => {
   baseDataVersion.value
   if (route.name === 'TransportBaseData')
     return activeBaseDataTabConfig.value.rows
@@ -700,7 +722,12 @@ const sourceTableRows = computed(() => {
   if (route.name === 'TransportEtc') {
     // Normalize legacy rows too; older imports may have persisted PDF header
     // fragments as the route name before the parser validation was tightened.
-    return etcRows.value.map((row, index) => normalizeEtcRecord(row, index))
+    // Route recognition decorates copies so imported ETC data remains unchanged.
+    return decorateEtcRoutes(
+      etcRows.value.map((row, index) => normalizeEtcRecord(row, index)),
+      importedRouteRows,
+      orderRows.value,
+    )
   }
   if (route.name === 'TransportDriverPayroll') {
     return transportDriverPayrollRows.value
@@ -713,6 +740,8 @@ const {
   queryParams: queryFiscalPayload,
   resetFinancialPeriodFilter,
 } = useFinancialPeriodFilter(route.name === 'TransportOrders'
+  || route.name === 'TransportFuel'
+  || route.name === 'TransportDriverPayroll'
   ? {
       financialYear: Number(getCurrentFinancialMonthRange().key.slice(0, 4)),
       financialMonth: Number(getCurrentFinancialMonthRange().key.slice(4, 6)),
@@ -728,6 +757,7 @@ const baseDataFilterExcludedFields = new Set([
   'unloadingLongitude',
   'unloadingLatitude',
 ])
+const routeCoordinateDataFields = ['loadingLongitude', 'loadingLatitude', 'unloadingLongitude', 'unloadingLatitude'] as const
 
 const activeBaseDataFilterColumns = computed(() => {
   if (route.name !== 'TransportBaseData')
@@ -761,7 +791,11 @@ const orderVehicleFilterOptions = computed(() => {
 })
 
 const orderCustomerFilterOptions = computed(() => {
-  return [...new Set(orderRows.value.map(row => String(row.customer || '').trim()).filter(Boolean))]
+  const fiscalPayload = queryFiscalPayload.value
+  return [...new Set(orderRows.value
+    .filter(row => matchesFinancialRange(row, fiscalPayload))
+    .map(row => String(row.customer || '').trim())
+    .filter(Boolean))]
     .sort((a, b) => a.localeCompare(b, 'zh-CN'))
     .map(value => ({ value, label: value }))
 })
@@ -783,14 +817,21 @@ const tableRows = computed(() => {
     if (route.name !== 'TransportBaseData' && queryModel.keyword && !Object.values(row).some(value => String(value ?? '').includes(queryModel.keyword)))
       return false
     if (route.name !== 'TransportBaseData' && queryModel.status) {
-      const statusMap: Record<string, string[]> = {
+      const transportStatusMap: Record<string, string[]> = {
+        loading: ['装车'],
+        unloading: ['卸车'],
+        transit: ['运输中'],
+        returning: ['空返'],
+      }
+      const businessStatusMap: Record<string, string[]> = {
         pending: ['待审核', '待处理', '待派车', '待审批', '待完善', '待确认', '待复核', '待还款', '装车'],
         running: ['运输中', '处理中', '审批中', '生效中', '核算中', '推修中'],
         done: ['已完成', '已通过', '已发放', '已扣款', '正常', '卸车', '空返'],
       }
+      const statusMap = route.name === 'TransportOrders' ? transportStatusMap : businessStatusMap
       const allowed = statusMap[queryModel.status] ?? [queryModel.status]
       const stageLabel = route.name === 'TransportOrders' ? getTransportStageTag(row).label : ''
-      if (!allowed.some(item => String(row.status ?? '').includes(item) || stageLabel.includes(item)))
+      if (!allowed.some(item => route.name === 'TransportOrders' ? stageLabel === item : String(row.status ?? '').includes(item)))
         return false
     }
     if (route.name === 'TransportOrders' && queryModel.vehicle) {
@@ -816,6 +857,14 @@ watch(activeBaseDataTab, () => {
   Object.keys(baseDataQueryModel).forEach(key => delete baseDataQueryModel[key])
 })
 
+watch(
+  [() => route.name, activeBaseDataTab, () => transportBaseRouteRows.value.length],
+  () => {
+    void resolveMissingRouteCoordinates()
+  },
+  { immediate: true },
+)
+
 function getRowBusinessDate(row: Record<string, string | undefined>) {
   const dateValue = row.shipDate || row.date || row.repairDate || row.updatedAt
   if (dateValue)
@@ -828,13 +877,27 @@ function getRowBusinessDate(row: Record<string, string | undefined>) {
   return undefined
 }
 
-function matchesFinancialRange(row: Record<string, string | undefined>, filters: { startDate?: string, endDate?: string }) {
+function matchesFinancialRange(row: Record<string, string | undefined>, filters: {
+  startDate?: string
+  endDate?: string
+  financialYear?: number
+  financialMonth?: number
+  periodType?: 'customRange' | 'financialMonth' | 'financialYear'
+}) {
   if (!filters.startDate || !filters.endDate)
     return true
 
+  const rowMonthKey = extractFinancialMonthKey(row)
+  if (filters.periodType === 'financialMonth' && filters.financialYear && filters.financialMonth) {
+    const selectedMonthKey = `${filters.financialYear}${String(filters.financialMonth).padStart(2, '0')}`
+    return rowMonthKey === selectedMonthKey
+  }
+  if (filters.periodType === 'financialYear' && filters.financialYear && rowMonthKey)
+    return rowMonthKey.startsWith(String(filters.financialYear))
+
   const rowDate = getRowBusinessDate(row)
   if (!rowDate?.isValid())
-    return true
+    return false
 
   return !rowDate.isBefore(dayjs(filters.startDate), 'day') && rowDate.isBefore(dayjs(filters.endDate), 'day')
 }
@@ -845,6 +908,15 @@ function openBatchFilePicker(kind: 'fuel' | 'etc') {
   batchFilePickerKind.value = kind
   batchSelectedFiles.value = []
   batchFilePickerOpen.value = true
+}
+
+function openAddRecord() {
+  if (route.name === 'TransportOrders') {
+    openOrderModal()
+    return
+  }
+  if (route.name === 'TransportFuel')
+    manualRecordOpen.value = true
 }
 
 function addBatchSelectedFiles(file: File, fileList?: File[]) {
@@ -858,6 +930,20 @@ function addBatchSelectedFiles(file: File, fileList?: File[]) {
     }
   })
   return false
+}
+
+function selectBatchFolder() {
+  batchFolderInput.value?.click()
+}
+
+function addBatchSelectedFolder(event: Event) {
+  const input = event.target as HTMLInputElement
+  const supportedFiles = Array.from(input.files ?? []).filter(file => /\.(?:xlsx?|csv|pdf)$/i.test(file.name))
+  if (!supportedFiles.length)
+    message.warning('所选文件夹中没有可导入的 Excel、CSV 或 PDF 文件')
+  else
+    addBatchSelectedFiles(supportedFiles[0], supportedFiles)
+  input.value = ''
 }
 
 function removeBatchSelectedFile(file: File) {
@@ -878,6 +964,15 @@ function parseBatchSelectedFiles() {
 }
 
 function getImportPreviewColumns(kind: ImportKind): ImportTableColumn[] {
+  if (kind === 'base' && activeBaseDataTab.value === 'route') {
+    return [
+      { title: '路线编号', dataIndex: 'code' },
+      { title: '客户名称', dataIndex: 'customer' },
+      { title: '路线名称', dataIndex: 'name' },
+      { title: '装车地址', dataIndex: 'loadingAddress' },
+      { title: '卸车地址', dataIndex: 'unloadingAddress' },
+    ]
+  }
   const columnMap: Record<ImportKind, ImportTableColumn[]> = {
     order: [
       { title: '订单编号', dataIndex: 'code' },
@@ -895,7 +990,7 @@ function getImportPreviewColumns(kind: ImportKind): ImportTableColumn[] {
       { title: '金额', dataIndex: 'amount' },
     ],
     etc: [
-      { title: '流水号', dataIndex: 'code', width: 150, align: 'center' },
+      { title: '汇总单号', dataIndex: 'summaryNo', width: 210, align: 'center' },
       { title: '通行日期', dataIndex: 'updatedAt', width: 130, align: 'center' },
       { title: '入口信息', dataIndex: 'entryInfo', width: 190 },
       { title: '出口信息', dataIndex: 'exitInfo', width: 190 },
@@ -973,6 +1068,13 @@ async function importBaseDataFromFile(file: File) {
         return Boolean(row.loadingAddress && (row.destinationName || row.unloadingAddress))
       return true
     })
+    if (tab.key === 'route') {
+      const coordinateSummary = await resolveImportedRouteCoordinates(rows)
+      if (coordinateSummary.resolved)
+        message.success(`路线导入前已自动识别 ${coordinateSummary.resolved} 个装卸车点坐标`)
+      if (coordinateSummary.unresolved)
+        message.warning(`${coordinateSummary.unresolved} 个装卸车点未找到精确坐标，已保留为空，请后续人工确认`)
+    }
     if (!rows.length) {
       openImportFailure('base', `${tab.title}导入确认`, file, '未识别到有效数据，请确认文件中包含编号、车号、客户名称或路线名称等关键表头')
       return
@@ -1018,24 +1120,30 @@ function openImportPreview(options: {
   fileSize?: number
   rows: Array<Record<string, string>>
   errorDetails?: string[]
-  apply?: (rows: Array<Record<string, string>>) => void
+  duplicateDetails?: string[]
+  summaryNo?: string
+  deduplicateRows?: boolean
+  apply?: (rows: Array<Record<string, string>>) => void | Promise<void>
+  persist?: boolean
 }) {
   const existingCodes = new Set(getExistingImportRows(options.kind).map(row => row.code).filter(Boolean))
   const seenCodes = new Set<string>()
-  const duplicateDetails: string[] = []
-  const importableRows = options.rows.filter((row, index) => {
-    const code = String(row.code ?? `import-row-${index}`)
-    if (existingCodes.has(code)) {
-      duplicateDetails.push(`${code} 已存在，禁止重复导入`)
-      return false
-    }
-    if (seenCodes.has(code)) {
-      duplicateDetails.push(`${code} 在本次文件中重复，已跳过`)
-      return false
-    }
-    seenCodes.add(code)
-    return true
-  })
+  const duplicateDetails: string[] = [...(options.duplicateDetails ?? [])]
+  const importableRows = options.deduplicateRows === false
+    ? options.rows
+    : options.rows.filter((row, index) => {
+        const code = String(row.code ?? `import-row-${index}`)
+        if (existingCodes.has(code)) {
+          duplicateDetails.push(`${code} 已存在，禁止重复导入`)
+          return false
+        }
+        if (seenCodes.has(code)) {
+          duplicateDetails.push(`${code} 在本次文件中重复，已跳过`)
+          return false
+        }
+        seenCodes.add(code)
+        return true
+      })
   const errorDetails = options.errorDetails ?? []
 
   setImportPendingState(importPreview, {
@@ -1046,8 +1154,10 @@ function openImportPreview(options: {
     columns: getImportPreviewColumns(options.kind),
     errorDetails,
     duplicateDetails,
+    summaryNo: options.summaryNo,
   })
   pendingImportApply.value = importableRows.length ? options.apply : undefined
+  pendingImportPersist.value = options.persist !== false
 }
 
 function openImportFailure(kind: ImportKind, title: string, file: File | undefined, error: string) {
@@ -1076,7 +1186,8 @@ function closeImportPreview() {
   importPreview.open = false
 }
 
-function downloadImportErrors() {
+async function downloadImportErrors() {
+  const XLSX = await loadXlsx()
   const workbook = XLSX.utils.book_new()
   const rows = [
     ...importPreview.errorDetails.map(item => ({ 类型: '错误', 明细: item })),
@@ -1110,9 +1221,11 @@ async function confirmImport() {
   }
 
   try {
-    pendingImportApply.value(selectedRows)
-    await nextTick()
-    await flushTransportOperationData()
+    await pendingImportApply.value(selectedRows)
+    if (pendingImportPersist.value) {
+      await nextTick()
+      await flushTransportOperationData()
+    }
     importPreview.status = 'completed'
     importPreview.statusText = getImportStatusText('completed')
     importPreview.progress = 100
@@ -1162,15 +1275,26 @@ const moduleSummaryCards = ref<TransportSummaryCard[]>([])
 const detailOpen = ref(false)
 const detailRecord = ref<Record<string, string>>()
 const driverPayrollActiveTab = ref('payroll')
-const todayAttendanceDate = ref(dayjs().format('YYYY-MM-DD'))
+const todayAttendanceDate = ref(getCurrentFinancialMonthRange().displayStartDate)
 const driverModeModalOpen = ref(false)
+const driverModeSaving = ref(false)
+const orderSaving = ref(false)
 const driverModeEditingRecord = ref<Record<string, any>>()
+const salaryModeSaveResultOpen = ref(false)
+const salaryModeSaveResult = reactive({
+  success: false,
+  title: '',
+  detail: '',
+})
 const driverModeForm = reactive({
   plateNos: '',
   newPlateNo: '',
   newPlateStartDate: dayjs().format('YYYY-MM-DD'),
   plateStartDates: {} as Record<string, string>,
   salaryMode: '固定月薪',
+  currentSalaryMode: '固定月薪',
+  modeHistory: [] as SalaryModeHistoryItem[],
+  modeEffectiveDate: getCurrentFinancialMonthRange().displayStartDate,
   modeAmount: 0,
 })
 
@@ -1279,6 +1403,10 @@ const hiddenDetailKeys = new Set([
   'gpsAction',
   'area',
   'detailAddress',
+  'loadingLongitude',
+  'loadingLatitude',
+  'unloadingLongitude',
+  'unloadingLatitude',
   'loadingFenceName',
   'loadingFenceRadius',
   'transitFenceName',
@@ -1341,7 +1469,7 @@ const driverPayrollVehicleOptions = computed(() => {
     .filter(row => row.code && !linkedPlates.has(normalizePayrollPlateNo(row.code)))
     .map(row => ({
       value: normalizePayrollPlateNo(row.code),
-      label: [row.code, row.trailerNo, row.driver || row.driverName].filter(Boolean).join(' / '),
+      label: row.code,
     }))
 })
 const baseCustomerOptions = computed(() => {
@@ -1401,6 +1529,10 @@ const baseDataFormColumns = computed(() => {
       { title: '挂号', dataIndex: 'trailerNo' },
       { title: '所在地区', dataIndex: 'area' },
       { title: '燃料类型', dataIndex: 'fuelType' },
+      { title: '道路运输证号', dataIndex: 'roadTransportCertificateNo' },
+      { title: '挂车道路运输证号', dataIndex: 'trailerRoadTransportCertificateNo' },
+      { title: '罐体编号', dataIndex: 'tankNo' },
+      { title: '罐体容积(m³)', dataIndex: 'tankVolume' },
       { title: '绑定司机', dataIndex: 'driver' },
       { title: '绑定押运员', dataIndex: 'escort' },
       { title: '状态', dataIndex: 'status' },
@@ -1415,7 +1547,7 @@ const baseDataFormColumns = computed(() => {
   }
   if (activeBaseDataTab.value === 'route') {
     return activeBaseDataTabConfig.value.columns
-      .filter(column => !['action', 'routeValidityRange'].includes(column.dataIndex))
+      .filter(column => !['action', 'routeValidityRange', ...routeCoordinateDataFields].includes(column.dataIndex))
       .flatMap((column) => {
         if (column.dataIndex === 'routeValidityType') {
           return [
@@ -1467,8 +1599,6 @@ const driverPayrollCurrentColumns = computed(() => {
 })
 
 const driverPayrollVisibleRows = computed(() => {
-  if (driverPayrollActiveTab.value !== 'payroll')
-    return tableRows.value
   return tableRows.value.filter((record: Record<string, any>) => String(record.crewRole || '司机').includes('司机'))
 })
 
@@ -1504,48 +1634,111 @@ const driverAttendancePeriodLabel = computed(() => {
 })
 
 const driverAttendanceGridStyle = computed(() => ({
-  gridTemplateColumns: `150px 210px 92px 132px 90px repeat(${driverAttendanceCalendarDays.value.length}, 44px) 58px`,
+  gridTemplateColumns: `140px 180px 150px 80px repeat(${driverAttendanceCalendarDays.value.length}, 40px) 56px`,
 }))
 
 const driverAttendanceGroups = computed(() => {
-  const groups = new Map<string, { key: string, plateNos: string[], members: Array<Record<string, any>> }>()
-  tableRows.value.forEach((record: Record<string, any>) => {
-    const plates = displayDriverPlateNos(record)
-    const key = plates.join('、') || `unbound-${record.code}`
-    const group = groups.get(key) ?? { key, plateNos: plates, members: [] }
-    group.members.push(record)
-    groups.set(key, group)
-  })
-  return [...groups.values()].map((group) => {
-    const members = group.members.sort((a, b) => String(a.crewRole).includes('司机') ? -1 : String(b.crewRole).includes('司机') ? 1 : 0)
-    return {
-      ...group,
-      members,
-      driver: members.find(record => String(record.crewRole || '司机').includes('司机')),
-    }
-  })
+  return tableRows.value
+    .filter((record: Record<string, any>) => String(record.crewRole || '司机').includes('司机'))
+    .map((driver: Record<string, any>) => ({
+      key: String(driver.code || driver.name),
+      plateNos: displayDriverPlateNos(driver),
+      members: [driver],
+      driver,
+    }))
 })
 
 const driverSalaryModeCards = computed(() => {
   const definitions = [
-    { mode: '固定月薪', description: '按财务月和司机出勤核算固定底薪' },
-    { mode: '底薪+差费', description: '底薪与运输差费组合核算' },
-    { mode: '底薪+里程', description: '底薪与运输里程组合核算' },
-    { mode: '纯里程', description: '仅按司机运输里程核算' },
+    { mode: '固定月薪', description: '按财务月和司机出勤核算固定金额' },
+    { mode: '底薪+差费', description: '配置底薪与运单设定差费组合核算' },
+    { mode: '市区倒短固定工资', description: '市区倒短按固定工资核算' },
   ]
   const drivers = tableRows.value.filter((record: Record<string, any>) => String(record.crewRole || '司机').includes('司机'))
   return definitions.map(definition => ({
     ...definition,
-    drivers: drivers.filter((record: Record<string, any>) => String(record.salaryMode || '固定月薪') === definition.mode),
+    amount: toNumber(transportDriverPayrollRows.value.find(record => record.crewRole === '模式配置' && normalizeSalaryMode(record.salaryMode) === definition.mode)?.modeAmount
+      || drivers.find(record => normalizeSalaryMode(record.salaryMode) === definition.mode)?.modeAmount
+      || 0),
+    drivers: drivers.filter((record: Record<string, any>) => normalizeSalaryMode(record.salaryMode) === definition.mode),
   }))
 })
+const driverSalaryModeAmountMap = computed(() => Object.fromEntries(driverSalaryModeCards.value.map(card => [card.mode, card.amount])))
 
-function handleQuery() {
-  loadModuleSummary()
-  message.success('查询完成')
+async function saveGlobalSalaryMode(mode: string, amount: number) {
+  const normalizedAmount = formatPlainAmount(toNumber(amount))
+  let lastError: any
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      await loadTransportOperationData({ force: attempt > 0 })
+      await nextTick()
+      if (transportOperationError.value)
+        throw new Error(transportOperationError.value)
+      let configRecord = transportDriverPayrollRows.value.find(record => record.crewRole === '模式配置' && normalizeSalaryMode(record.salaryMode) === mode)
+      if (!configRecord) {
+        configRecord = {
+          code: `MODE_CONFIG_${mode}`,
+          name: `${mode}统一金额`,
+          crewRole: '模式配置',
+          financeMonth: '2000-01',
+          owner: '薪资模式配置',
+          status: '已配置',
+          salaryMode: mode,
+          modeAmount: normalizedAmount,
+          amount: normalizedAmount,
+          updatedAt: dayjs().format('YYYY-MM-DD'),
+        }
+        transportDriverPayrollRows.value.push(configRecord)
+      }
+      else {
+        configRecord.modeAmount = normalizedAmount
+        configRecord.amount = normalizedAmount
+        configRecord.updatedAt = dayjs().format('YYYY-MM-DD')
+      }
+      tableRows.value.filter((record: Record<string, any>) => String(record.crewRole || '司机').includes('司机') && normalizeSalaryMode(record.salaryMode) === mode).forEach((record: Record<string, any>) => {
+        record.salaryMode = mode
+        record.modeAmount = normalizedAmount
+        if (mode.includes('固定') || mode === '底薪+差费')
+          record.baseSalary = normalizedAmount
+        else
+          record.tripCommission = normalizedAmount
+        recalculateDriverPayroll(record)
+      })
+      await nextTick()
+      await flushTransportOperationData()
+      await loadTransportOperationData({ force: true })
+      const savedRecord = transportDriverPayrollRows.value.find(record => record.crewRole === '模式配置' && normalizeSalaryMode(record.salaryMode) === mode)
+      if (!savedRecord || formatPlainAmount(toNumber(savedRecord.modeAmount)) !== normalizedAmount)
+        throw new Error('服务器未返回刚保存的模式金额')
+      salaryModeSaveResult.success = true
+      salaryModeSaveResult.title = '保存成功'
+      salaryModeSaveResult.detail = `${mode}金额已保存：${normalizedAmount} 元。刷新页面后仍会保留。`
+      salaryModeSaveResultOpen.value = true
+      return
+    }
+    catch (error: any) {
+      lastError = error
+      if (!String(error?.message || '').includes('数据已被其他用户更新') && attempt === 2)
+        break
+    }
+  }
+  salaryModeSaveResult.success = false
+  salaryModeSaveResult.title = '保存失败'
+  salaryModeSaveResult.detail = lastError?.message || `${mode}统一金额保存失败，请稍后重试。`
+  salaryModeSaveResultOpen.value = true
 }
 
-function exportCurrentRows() {
+function normalizeSalaryMode(mode: unknown) {
+  return String(mode || '固定月薪') === '纯里程' ? '市区倒短固定工资' : String(mode || '固定月薪')
+}
+
+function handleQuery() {
+  tablePagination.current = 1
+  loadModuleSummary()
+}
+
+async function exportCurrentRows() {
+  const XLSX = await loadXlsx()
   const payload = queryFiscalPayload.value
   const workbook = XLSX.utils.book_new()
   const activeBaseTab = baseDataTabs.find(tab => tab.key === activeBaseDataTab.value)
@@ -1622,8 +1815,9 @@ function resetQuery() {
   queryModel.vehicle = undefined
   queryModel.customer = undefined
   Object.keys(baseDataQueryModel).forEach(key => delete baseDataQueryModel[key])
+  tablePagination.current = 1
   const currentMonth = getCurrentFinancialMonthRange()
-  resetFinancialPeriodFilter(route.name === 'TransportOrders'
+  resetFinancialPeriodFilter(route.name !== 'TransportBaseData'
     ? {
         financialYear: Number(currentMonth.key.slice(0, 4)),
         financialMonth: Number(currentMonth.key.slice(4, 6)),
@@ -1644,7 +1838,7 @@ function enhanceTableColumn(column: Record<string, any>) {
   const enhanced: Record<string, any> = {
     ...column,
     width: column.width ?? inferTransportColumnWidth(column, dataIndex),
-    ellipsis: column.ellipsis ?? !['status', 'action', 'gpsAction'].includes(dataIndex),
+    ellipsis: false,
     customCell: () => ({ class: [tableCellClass(dataIndex), column.ellipsis === false ? 'table-cell-no-ellipsis' : ''].filter(Boolean).join(' ') }),
   }
   if (!enhanced.align) {
@@ -1655,8 +1849,11 @@ function enhanceTableColumn(column: Record<string, any>) {
     else if (['action', 'gpsAction', 'status'].includes(dataIndex))
       enhanced.align = 'center'
   }
-  if (dataIndex && !['action', 'gpsAction'].includes(dataIndex) && !enhanced.sorter)
+  if (dataIndex && !['action', 'gpsAction'].includes(dataIndex) && !enhanced.sorter) {
     enhanced.sorter = (a: Record<string, string>, b: Record<string, string>) => compareTableValue(a[dataIndex], b[dataIndex])
+    enhanced.sortDirections = ['ascend', 'descend']
+    enhanced.showSorterTooltip = { target: 'full-header' }
+  }
   return enhanced
 }
 
@@ -1727,10 +1924,8 @@ function findRouteFence(record: Record<string, any>) {
 }
 
 function resolveTransportStage(record: Record<string, any>): TransportStage {
-  if (!isLatestVehicleOrder(record))
-    return 'completed'
-
-  const nearbyFence = findNearbyGpsFence(getOrderGpsLocation(record), orderGpsGeofences.value)
+  const location = getOrderGpsLocation(record)
+  const nearbyFence = getNearbyOrderGpsFence(record)
   if (nearbyFence?.routeStage === 'unloading' || /卸车/.test(nearbyFence?.name ?? ''))
     return 'unloading'
   if (nearbyFence?.routeStage === 'loading' || /装车/.test(nearbyFence?.name ?? ''))
@@ -1740,6 +1935,15 @@ function resolveTransportStage(record: Record<string, any>): TransportStage {
   const receiptStatus = String(record.receiptStatus ?? '')
   const settlementStatus = String(record.settlementStatus ?? '')
   const routeFence = findRouteFence(record)
+  const addressStage = location
+    ? resolveGpsRouteStageByAddress(getOrderGpsLocationLabel(record), {
+        loadingAddress: record.loadingAddress || routeFence?.loadingAddress,
+        unloadingAddress: record.unloadingAddress || routeFence?.unloadingAddress,
+      })
+    : undefined
+
+  if (addressStage)
+    return addressStage
 
   // Real GPS integration can replace this block with: point in loading/transit/unloading/return fence.
   if (/空返|返程|回场|返场/.test(status))
@@ -1748,7 +1952,7 @@ function resolveTransportStage(record: Record<string, any>): TransportStage {
     return settlementStatus.includes('已结算') ? 'returning' : 'unloading'
   if (/运输中|在途|已发车|配送中/.test(status))
     return 'transit'
-  if (routeFence && /待审核|待派车|待装车|装车|草稿/.test(status))
+  if (!location && routeFence && /待审核|待派车|待装车|装车|草稿/.test(status))
     return 'loading'
   return 'transit'
 }
@@ -1756,12 +1960,11 @@ function resolveTransportStage(record: Record<string, any>): TransportStage {
 function getTransportStageTag(record: Record<string, any>) {
   const stage = resolveTransportStage(record)
   const profile = transportStageProfiles[stage]
-  const fence = findRouteFence(record)
-  const decoratedFence = fence ? decorateRouteGeofences(fence) as Record<string, string> : undefined
+  const nearbyFence = getNearbyOrderGpsFence(record)
   return {
     ...profile,
     stage,
-    fenceName: decoratedFence?.[profile.fenceField] || '',
+    fenceName: nearbyFence?.name || '',
   }
 }
 
@@ -1833,6 +2036,10 @@ function resetBaseDataForm(tab = activeBaseDataTabConfig.value) {
 }
 
 function openBaseDataCreate() {
+  if (activeBaseDataTab.value === 'company' && activeBaseDataTabConfig.value.rows.length) {
+    openBaseDataEdit(activeBaseDataTabConfig.value.rows[0])
+    return
+  }
   baseDataEditingCode.value = ''
   resetBaseDataForm()
   baseDataModalOpen.value = true
@@ -1853,14 +2060,183 @@ function openBaseDataEdit(record: Record<string, string>) {
 }
 
 function normalizeCoordinateAddress(value: unknown) {
-  return String(value ?? '').trim().replace(/[\s()（）·・,，。]/g, '').toLowerCase()
+  return normalizeRouteCoordinateAddress(value)
 }
 
 function validCoordinatePair(longitude: unknown, latitude: unknown) {
-  const pair: [number, number] = [Number(longitude), Number(latitude)]
-  return Number.isFinite(pair[0]) && Number.isFinite(pair[1]) && Math.abs(pair[0]) <= 180 && Math.abs(pair[1]) <= 90
-    ? pair
-    : undefined
+  return validRouteCoordinatePair(longitude, latitude)
+}
+
+type RouteCoordinateStage = 'loading' | 'unloading'
+
+function routeCoordinateFields(stage: RouteCoordinateStage) {
+  return stage === 'loading'
+    ? { address: 'loadingAddress', longitude: 'loadingLongitude', latitude: 'loadingLatitude' }
+    : { address: 'unloadingAddress', longitude: 'unloadingLongitude', latitude: 'unloadingLatitude' }
+}
+
+interface RouteCoordinateSummary {
+  resolved: number
+  unresolved: number
+}
+
+let routeCoordinateBackfillRunning = false
+let routeCoordinateAutosaveQueue: Promise<void> = Promise.resolve()
+
+async function resolveImportedRouteCoordinates(rows: Array<Record<string, string>>): Promise<RouteCoordinateSummary> {
+  const coordinateCache = new Map<string, Promise<[number, number] | undefined>>()
+  let fences: GpsGeofence[] = []
+  try {
+    const response = await getGpsGeofencesApi()
+    fences = response.data || []
+  }
+  catch {
+    // Geofences are an optimization; address geocoding can still resolve coordinates.
+  }
+
+  let resolved = 0
+  let unresolved = 0
+  const pending = rows.flatMap(row => (['loading', 'unloading'] as RouteCoordinateStage[]).map(stage => ({ row, stage })))
+  let cursor = 0
+
+  async function resolveOne(item: { row: Record<string, string>, stage: RouteCoordinateStage }) {
+    const fields = routeCoordinateFields(item.stage)
+    const row = item.row
+    if (validRouteCoordinatePair(row[fields.longitude], row[fields.latitude]))
+      return
+
+    const address = String(row[fields.address] || '').trim()
+    const normalizedAddress = normalizeRouteCoordinateAddress(address)
+    if (!normalizedAddress)
+      return
+
+    const cacheKey = `${item.stage}:${normalizedAddress}`
+    let coordinatePromise = coordinateCache.get(cacheKey)
+    if (!coordinatePromise) {
+      coordinatePromise = (async () => {
+        let coordinate: [number, number] | undefined
+        const historicalRoute = transportBaseRouteRows.value.find((candidate) => {
+          const candidateFields = routeCoordinateFields(item.stage)
+          return normalizeRouteCoordinateAddress(candidate[candidateFields.address]) === normalizedAddress
+            && validRouteCoordinatePair(candidate[candidateFields.longitude], candidate[candidateFields.latitude])
+        })
+        if (historicalRoute)
+          coordinate = validRouteCoordinatePair(historicalRoute[fields.longitude], historicalRoute[fields.latitude])
+
+        if (!coordinate) {
+          const fence = fences.find(candidate => candidate.shape === 'circle'
+            && candidate.center
+            && normalizeRouteCoordinateAddress(candidate.address) === normalizedAddress)
+          coordinate = fence?.center && validRouteCoordinatePair(fence.center[0], fence.center[1])
+        }
+
+        if (!coordinate) {
+          try {
+            const geocodeResult = await geocodeGpsAddressApi(address)
+            if (geocodeResult.code === 200 && geocodeResult.data?.precise)
+              coordinate = validRouteCoordinatePair(geocodeResult.data.longitude, geocodeResult.data.latitude)
+          }
+          catch {
+            // Keep the row importable when the geocoding provider is unavailable.
+          }
+        }
+        return coordinate
+      })()
+      coordinateCache.set(cacheKey, coordinatePromise)
+    }
+
+    const coordinate = await coordinatePromise
+    if (!coordinate) {
+      unresolved++
+      return
+    }
+    row[fields.longitude] = coordinate[0].toFixed(6)
+    row[fields.latitude] = coordinate[1].toFixed(6)
+    resolved++
+  }
+
+  async function worker() {
+    while (cursor < pending.length) {
+      const index = cursor++
+      await resolveOne(pending[index])
+    }
+  }
+
+  await Promise.all(Array.from({ length: Math.min(3, pending.length) }, () => worker()))
+  return { resolved, unresolved }
+}
+
+async function resolveMissingRouteCoordinates() {
+  if (route.name !== 'TransportBaseData' || activeBaseDataTab.value !== 'route' || routeCoordinateBackfillRunning)
+    return
+
+  const rows = transportBaseRouteRows.value.filter((row) => {
+    const loadingMissing = String(row.loadingAddress || '').trim()
+      && !validRouteCoordinatePair(row.loadingLongitude, row.loadingLatitude)
+    const unloadingMissing = String(row.unloadingAddress || '').trim()
+      && !validRouteCoordinatePair(row.unloadingLongitude, row.unloadingLatitude)
+    return loadingMissing || unloadingMissing
+  })
+  if (!rows.length)
+    return
+
+  routeCoordinateBackfillRunning = true
+  try {
+    const summary = await resolveImportedRouteCoordinates(rows)
+    if (summary.resolved) {
+      baseDataVersion.value += 1
+      await flushTransportOperationData()
+      refreshModuleList()
+      message.success(`已自动补齐 ${summary.resolved} 个装卸车点坐标`)
+    }
+    if (summary.unresolved)
+      message.warning(`${summary.unresolved} 个装卸车点未找到精确坐标，已保留为空，请人工确认`)
+  }
+  catch {
+    message.warning('路线坐标自动回填暂时不可用，请稍后重试')
+  }
+  finally {
+    routeCoordinateBackfillRunning = false
+  }
+}
+
+function enqueueRouteCoordinateAutosave(stage: RouteCoordinateStage, address: string, coordinate: [number, number]) {
+  routeCoordinateAutosaveQueue = routeCoordinateAutosaveQueue
+    .catch(() => undefined)
+    .then(() => persistRouteCoordinateChange(stage, address, coordinate))
+  return routeCoordinateAutosaveQueue
+}
+
+async function persistRouteCoordinateChange(stage: RouteCoordinateStage, address: string, coordinate: [number, number]) {
+  const editingCode = String(baseDataEditingCode.value || '').trim()
+  if (!editingCode)
+    return
+  const row = transportBaseRouteRows.value.find(item => item.code === editingCode)
+  if (!row)
+    return
+
+  const fields = routeCoordinateFields(stage)
+  const snapshot = { ...row }
+  Object.assign(row, {
+    [fields.address]: address,
+    [fields.longitude]: coordinate[0].toFixed(6),
+    [fields.latitude]: coordinate[1].toFixed(6),
+    updatedAt: dayjs().format('YYYY-MM-DD'),
+  })
+  baseDataVersion.value += 1
+  try {
+    const hasBothCoordinates = validRouteCoordinatePair(row.loadingLongitude, row.loadingLatitude)
+      && validRouteCoordinatePair(row.unloadingLongitude, row.unloadingLatitude)
+    if (hasBothCoordinates)
+      await syncRouteGeofencesForPayload(row)
+    await flushTransportOperationData()
+    refreshModuleList()
+  }
+  catch (error) {
+    Object.assign(row, snapshot)
+    baseDataVersion.value += 1
+    throw error
+  }
 }
 
 async function autoResolveRouteCoordinates(field: string) {
@@ -1920,7 +2296,7 @@ async function autoResolveRouteCoordinates(field: string) {
     baseDataForm[longitudeField] = coordinate[0].toFixed(6)
     baseDataForm[latitudeField] = coordinate[1].toFixed(6)
     routeCoordinateSourceAddress[stage] = address
-    message.success(`${stage === 'loading' ? '装货地' : '卸货地'}经纬度已自动填写`)
+    await enqueueRouteCoordinateAutosave(stage, address, coordinate)
   }
   catch {
     message.warning('坐标自动解析暂时不可用，请稍后重试')
@@ -2004,6 +2380,11 @@ function normalizeBaseDataPayload(tab: BaseDataTab) {
     return target
   }, {})
 
+  if (tab.key === 'company') {
+    payload.businessLicenseUrl = String(baseDataForm.businessLicenseUrl ?? '').trim()
+    payload.roadTransportLicenseUrl = String(baseDataForm.roadTransportLicenseUrl ?? '').trim()
+  }
+
   if (tab.key === 'crew') {
     payload.vehicleInfo = formatCrewVehicleInfo(payload)
     payload.name = formatCrewName(payload)
@@ -2014,6 +2395,9 @@ function normalizeBaseDataPayload(tab: BaseDataTab) {
     })
   }
   if (tab.key === 'route') {
+    routeCoordinateDataFields.forEach((field) => {
+      payload[field] = String(baseDataForm[field] ?? '').trim()
+    })
     payload.routeValidityType = String(baseDataForm.routeValidityType ?? payload.routeValidityType ?? '长期').trim() || '长期'
     payload.routeEffectiveStartDate = String(baseDataForm.routeEffectiveStartDate ?? '').trim()
     payload.routeEffectiveEndDate = String(baseDataForm.routeEffectiveEndDate ?? '').trim()
@@ -2033,6 +2417,32 @@ function normalizeBaseDataPayload(tab: BaseDataTab) {
 
   payload.updatedAt = payload.updatedAt || dayjs().format('YYYY-MM-DD')
   return payload
+}
+
+function getRouteCoordinateCenter(payload: Record<string, string>, stage: RouteCoordinateStage): [number, number] | undefined {
+  const fields = routeCoordinateFields(stage)
+  const longitude = String(payload[fields.longitude] ?? '').trim()
+  const latitude = String(payload[fields.latitude] ?? '').trim()
+  if (!longitude && !latitude)
+    return undefined
+  const coordinate = validRouteCoordinatePair(longitude, latitude)
+  if (!coordinate)
+    throw new Error(`${stage === 'loading' ? '装车地' : '卸车地'}经纬度不合法`)
+  return coordinate
+}
+
+async function syncRouteGeofencesForPayload(payload: Record<string, string>) {
+  const fenceResult = await syncGpsRouteGeofencesApi({
+    routeCode: payload.code,
+    routeName: payload.name,
+    loadingAddress: payload.loadingAddress,
+    unloadingAddress: payload.unloadingAddress,
+    loadingCenter: getRouteCoordinateCenter(payload, 'loading'),
+    unloadingCenter: getRouteCoordinateCenter(payload, 'unloading'),
+    radius: 1500,
+  })
+  if (fenceResult.code !== 200)
+    throw new Error(fenceResult.msg || '路线电子围栏创建失败')
 }
 
 function ensureVehicleForCrew(crew: Record<string, string>, previousCrew?: Record<string, string>) {
@@ -2117,10 +2527,11 @@ async function saveBaseDataRecord() {
 
   baseDataSubmitting.value = true
   const snapshots = {
-    customers: structuredClone(transportBaseCustomerRows.value),
-    vehicles: structuredClone(transportBaseVehicleRows.value),
-    crews: structuredClone(transportBaseCrewRows.value),
-    routes: structuredClone(transportBaseRouteRows.value),
+    companies: cloneDeep(transportBaseCompanyRows.value),
+    customers: cloneDeep(transportBaseCustomerRows.value),
+    vehicles: cloneDeep(transportBaseVehicleRows.value),
+    crews: cloneDeep(transportBaseCrewRows.value),
+    routes: cloneDeep(transportBaseRouteRows.value),
   }
   try {
     const payload = normalizeBaseDataPayload(tab)
@@ -2133,13 +2544,14 @@ async function saveBaseDataRecord() {
 
     const index = tab.rows.findIndex(row => row.code === baseDataEditingCode.value)
     const previousRecord = index > -1 ? { ...tab.rows[index] } : undefined
+    const successMessage = index > -1 ? '基础资料已更新' : '基础资料已新增'
     if (index > -1) {
       tab.rows[index] = payload
-      message.success('基础资料已更新')
     }
     else {
+      if (tab.key === 'company')
+        tab.rows.splice(0, tab.rows.length)
       tab.rows.unshift(payload)
-      message.success('基础资料已新增')
     }
     if (tab.key === 'crew')
       ensureVehicleForCrew(payload, previousRecord)
@@ -2147,32 +2559,15 @@ async function saveBaseDataRecord() {
       syncCrewForVehicle(payload, previousRecord)
     baseDataVersion.value += 1
     await nextTick()
-    if (tab.key === 'route') {
-      const coordinate = (longitude: string, latitude: string) => {
-        if (!longitude && !latitude)
-          return undefined
-        const center: [number, number] = [Number(longitude), Number(latitude)]
-        if (!Number.isFinite(center[0]) || !Number.isFinite(center[1]) || Math.abs(center[0]) > 180 || Math.abs(center[1]) > 90)
-          throw new Error('装卸车点经纬度不合法')
-        return center
-      }
-      const fenceResult = await syncGpsRouteGeofencesApi({
-        routeCode: payload.code,
-        routeName: payload.name,
-        loadingAddress: payload.loadingAddress,
-        unloadingAddress: payload.unloadingAddress,
-        loadingCenter: coordinate(payload.loadingLongitude, payload.loadingLatitude),
-        unloadingCenter: coordinate(payload.unloadingLongitude, payload.unloadingLatitude),
-        radius: 1500,
-      })
-      if (fenceResult.code !== 200)
-        throw new Error(fenceResult.msg || '路线电子围栏创建失败')
-    }
+    if (tab.key === 'route')
+      await syncRouteGeofencesForPayload(payload)
     await flushTransportOperationData()
+    message.success(successMessage)
     baseDataModalOpen.value = false
     refreshModuleList()
   }
   catch (error: any) {
+    transportBaseCompanyRows.value.splice(0, transportBaseCompanyRows.value.length, ...snapshots.companies)
     transportBaseCustomerRows.value.splice(0, transportBaseCustomerRows.value.length, ...snapshots.customers)
     transportBaseVehicleRows.value.splice(0, transportBaseVehicleRows.value.length, ...snapshots.vehicles)
     transportBaseCrewRows.value.splice(0, transportBaseCrewRows.value.length, ...snapshots.crews)
@@ -2365,7 +2760,76 @@ function editBusinessRecord(record: Record<string, string>) {
     return
   }
 
-  message.info('当前模块暂未配置编辑表单')
+  if (['TransportFuel', 'TransportEtc', 'TransportDriverPayroll'].includes(String(route.name))) {
+    businessEditingRecord.value = record
+    Object.keys(businessEditForm).forEach(key => delete businessEditForm[key])
+    Object.assign(businessEditForm, record)
+    businessEditOpen.value = true
+    return
+  }
+
+  message.warning('当前记录不支持编辑')
+}
+
+const businessEditFields = computed(() => {
+  if (route.name === 'TransportFuel') {
+    return [
+      { key: 'date', label: '加油日期', type: 'date' },
+      { key: 'plateNo', label: '车牌号' },
+      { key: 'driver', label: '司机' },
+      { key: 'location', label: '加油地点' },
+      { key: 'product', label: '油品' },
+      { key: 'quantity', label: '加油量' },
+      { key: 'amount', label: '金额' },
+      { key: 'status', label: '状态' },
+    ]
+  }
+  if (route.name === 'TransportEtc') {
+    return [
+      { key: 'updatedAt', label: '通行日期', type: 'date' },
+      { key: 'plateNo', label: '车牌号' },
+      { key: 'routeLine', label: '通行路线' },
+      { key: 'invoiceNo', label: '发票号码' },
+      { key: 'cardNo', label: 'ETC卡号' },
+      { key: 'amount', label: '金额' },
+      { key: 'status', label: '状态' },
+    ]
+  }
+  return [
+    { key: 'name', label: '司机姓名' },
+    { key: 'owner', label: '关联车辆' },
+    { key: 'financeMonth', label: '财务月' },
+    { key: 'salaryMode', label: '薪资模式' },
+    { key: 'baseSalary', label: '基础工资' },
+    { key: 'tripCommission', label: '趟次提成' },
+    { key: 'allowance', label: '补贴' },
+    { key: 'deduction', label: '扣款' },
+    { key: 'amount', label: '实发金额' },
+    { key: 'status', label: '状态' },
+  ]
+})
+
+async function saveBusinessEdit() {
+  const record = businessEditingRecord.value
+  if (!record)
+    return
+  const snapshot = { ...record }
+  businessEditSaving.value = true
+  try {
+    Object.assign(record, businessEditForm)
+    await nextTick()
+    await flushTransportOperationData()
+    businessEditOpen.value = false
+    refreshModuleList()
+    message.success('编辑保存成功')
+  }
+  catch (error: any) {
+    Object.assign(record, snapshot)
+    message.error(error?.message || '编辑保存失败，已恢复原数据')
+  }
+  finally {
+    businessEditSaving.value = false
+  }
 }
 
 async function deleteBusinessRecord(record: Record<string, string>) {
@@ -2375,11 +2839,11 @@ async function deleteBusinessRecord(record: Record<string, string>) {
   const rows = getCurrentEditableRows(record)
   const index = rows?.findIndex(item => item.code === record.code)
   if (rows && index !== undefined && index > -1) {
-    const snapshot = structuredClone(rows)
+    const snapshot = cloneDeep(rows)
     try {
       rows.splice(index, 1)
       await nextTick()
-      await flushTransportOperationData()
+      await flushTransportOperationData({ confirmDestructiveReplace: true })
       message.success('删除成功')
       refreshModuleList()
     }
@@ -2390,7 +2854,8 @@ async function deleteBusinessRecord(record: Record<string, string>) {
   }
 }
 
-function downloadBusinessRecord(record: Record<string, string>) {
+async function downloadBusinessRecord(record: Record<string, string>) {
+  const XLSX = await loadXlsx()
   const worksheet = XLSX.utils.json_to_sheet([{ ...record }])
   const workbook = XLSX.utils.book_new()
   XLSX.utils.book_append_sheet(workbook, worksheet, '记录')
@@ -2495,19 +2960,24 @@ function getBusinessActions(record: Record<string, string>): RecordActionItem[] 
 }
 
 async function loadModuleSummary() {
-  if (route.name === 'TransportDriverPayroll') {
-    moduleSummaryCards.value = buildDriverPayrollSummaryCards(tableRows.value)
-    return
-  }
-
   summaryLoading.value = true
   try {
+    const currentMonth = getCurrentFinancialMonthRange()
+    const fiscalFilters = route.name === 'TransportBaseData'
+      ? {
+          financialYear: Number(currentMonth.key.slice(0, 4)),
+          financialMonth: Number(currentMonth.key.slice(4, 6)),
+          periodType: 'financialMonth' as const,
+          startDate: currentMonth.startDate,
+          endDate: currentMonth.endDate,
+        }
+      : queryFiscalPayload.value
     const res = await getTransportModuleSummaryApi({
       moduleName: String(route.name ?? 'TransportOrders'),
       rows: getModuleSummarySourceRows(),
       filters: {
         ...queryModel,
-        ...queryFiscalPayload.value,
+        ...fiscalFilters,
       },
     })
     moduleSummaryCards.value = res.data ?? []
@@ -2518,35 +2988,7 @@ async function loadModuleSummary() {
 }
 
 function getModuleSummarySourceRows() {
-  if (route.name !== 'TransportOrders')
-    return sourceTableRows.value
-
-  const filters = queryFiscalPayload.value
-  if (filters.periodType !== 'financialMonth')
-    return orderRows.value
-
-  const previousStart = dayjs(filters.startDate).subtract(1, 'month')
-  const currentEnd = dayjs(filters.endDate)
-  return orderRows.value.filter((row) => {
-    const date = getRowBusinessDate(row)
-    return date?.isValid() && !date.isBefore(previousStart, 'day') && date.isBefore(currentEnd, 'day')
-  })
-}
-
-function buildDriverPayrollSummaryCards(rows: Record<string, any>[]): TransportSummaryCard[] {
-  const attendanceDays = rows
-    .filter(row => String(row.crewRole || '司机').includes('司机'))
-    .reduce((sum, row) => sum + toNumber(row.attendanceDays), 0)
-  const tripCount = rows.reduce((sum, row) => sum + toNumber(row.tripCount), 0)
-  const netSalary = rows.reduce((sum, row) => sum + toNumber(row.netSalary || row.amount), 0)
-  const pendingCount = rows.filter(row => /待|核算|审批/.test(String(row.status || row.approvalStatus || '')) && !/通过|已发放/.test(String(row.status || row.approvalStatus || ''))).length
-
-  return [
-    { label: '出勤天数', value: `${attendanceDays} 天`, hint: '当前筛选司机合计', tone: 'primary' },
-    { label: '运输趟次', value: `${tripCount} 趟`, hint: '按薪酬单汇总', tone: 'default' },
-    { label: '待核算/审批', value: `${pendingCount} 单`, hint: '需继续处理', tone: pendingCount ? 'warning' : 'success' },
-    { label: '实发合计', value: formatPlainAmount(netSalary), hint: '用于费用归集', tone: 'success' },
-  ]
+  return sourceTableRows.value
 }
 
 function isDriverPayrollMoneyColumn(dataIndex: unknown) {
@@ -2588,7 +3030,6 @@ function normalizePayrollPlateNo(value: unknown) {
 function removeDriverPlateNo(plate: string) {
   const plates = displayDriverPlateNos(driverModeForm).filter(item => item !== plate && item !== '-')
   driverModeForm.plateNos = plates.join('、')
-  delete driverModeForm.plateStartDates[plate]
 }
 
 function addDriverPlateNo() {
@@ -2609,6 +3050,7 @@ function addDriverPlateNo() {
     plates.push(plate)
   driverModeForm.plateNos = plates.join('、')
   driverModeForm.plateStartDates[plate] = driverModeForm.newPlateStartDate
+  driverModeForm.modeEffectiveDate = driverModeForm.newPlateStartDate
   driverModeForm.newPlateNo = ''
 }
 
@@ -2619,20 +3061,22 @@ interface SalaryModeHistoryItem {
 }
 
 function parseSalaryModeHistory(record: Record<string, any>): SalaryModeHistoryItem[] {
+  const financialMonthStart = getDriverFinancialMonthStart(record)
   try {
     const parsed = JSON.parse(String(record.salaryModeHistory || '[]'))
     if (Array.isArray(parsed) && parsed.length) {
-      return parsed
+      const history = parsed
         .filter(item => item?.mode && dayjs(item?.startDate).isValid())
         .map(item => ({ mode: String(item.mode), startDate: String(item.startDate), amount: formatPlainAmount(toNumber(item.amount)) }))
         .sort((a, b) => a.startDate.localeCompare(b.startDate))
+      return history
     }
   }
   catch {}
   return [{
     mode: String(record.salaryMode || '固定月薪'),
-    startDate: String(record.modeStartDate || getDriverFinancialMonthStart(record)),
-    amount: formatPlainAmount(toNumber(record.modeAmount || (String(record.salaryMode || '').includes('固定') ? record.baseSalary : record.tripCommission))),
+    startDate: financialMonthStart,
+    amount: formatPlainAmount(toNumber(record.modeAmount || (normalizeSalaryMode(record.salaryMode).includes('固定') || normalizeSalaryMode(record.salaryMode) === '底薪+差费' ? record.baseSalary : record.tripCommission))),
   }]
 }
 
@@ -2640,15 +3084,36 @@ function getSalaryModeForDate(record: Record<string, any>, date: string) {
   return parseSalaryModeHistory(record).filter(item => !dayjs(date).isBefore(dayjs(item.startDate), 'day')).at(-1)
 }
 
-function hasDuplicatePlateAttendance(record: Record<string, any>, date: string) {
+function getActiveDriverPlates(record: Record<string, any>, date: string) {
+  let startDates: Record<string, string> = {}
+  try {
+    startDates = JSON.parse(String(record.plateStartDates || '{}'))
+  }
+  catch {}
+  return displayDriverPlateNos(record)
+    .map(normalizePayrollPlateNo)
+    .filter((plate) => {
+      const startDate = startDates[plate] || startDates[displayDriverPlateNos(record).find(item => normalizePayrollPlateNo(item) === plate) || '']
+      return !startDate || !dayjs(date).isBefore(dayjs(startDate), 'day')
+    })
+}
+
+function findDuplicatePlateAttendance(record: Record<string, any>, date: string) {
   const currentCode = String(record.code || '')
-  const currentRole = String(record.crewRole || '司机')
-  const currentPlates = new Set(displayDriverPlateNos(record))
-  return tableRows.value.some((row: Record<string, any>) => {
-    if (String(row.code || '') === currentCode || String(row.crewRole || '司机') !== currentRole || !isAttendanceDateMarked(row, date))
-      return false
-    return displayDriverPlateNos(row).some(plate => currentPlates.has(plate))
-  })
+  const currentPlates = new Set(getActiveDriverPlates(record, date))
+  const financeMonth = normalizeMonthKey(record.financeMonth)
+  for (const row of transportDriverPayrollRows.value) {
+    if (String(row.code || '') === currentCode
+      || !String(row.crewRole || '司机').includes('司机')
+      || normalizeMonthKey(row.financeMonth) !== financeMonth
+      || !isAttendanceDateMarked(row, date)) {
+      continue
+    }
+    const duplicatePlate = getActiveDriverPlates(row, date).find(plate => currentPlates.has(plate))
+    if (duplicatePlate)
+      return duplicatePlate
+  }
+  return ''
 }
 
 function isDriverModeActive(record: Record<string, any>, date: string) {
@@ -2671,19 +3136,24 @@ function openDriverModeConfig(record: Record<string, any>) {
   driverModeEditingRecord.value = record
   driverModeForm.plateNos = String(record.plateNos || record.plateNo || '')
   driverModeForm.newPlateNo = ''
-  driverModeForm.newPlateStartDate = todayAttendanceDate.value
+  driverModeForm.newPlateStartDate = getDriverFinancialMonthStart(record)
   try {
     driverModeForm.plateStartDates = JSON.parse(String(record.plateStartDates || '{}'))
   }
   catch {
     driverModeForm.plateStartDates = {}
   }
-  driverModeForm.salaryMode = String(record.salaryMode || '固定月薪')
-  driverModeForm.modeAmount = toNumber(record.modeAmount || (driverModeForm.salaryMode.includes('固定') ? record.baseSalary : record.tripCommission))
+  driverModeForm.salaryMode = normalizeSalaryMode(record.salaryMode)
+  driverModeForm.currentSalaryMode = driverModeForm.salaryMode
+  driverModeForm.modeHistory = parseSalaryModeHistory(record)
+  driverModeForm.modeEffectiveDate = todayAttendanceDate.value || getDriverFinancialMonthStart(record)
+  driverModeForm.modeAmount = toNumber(record.modeAmount || (driverModeForm.salaryMode.includes('固定') || driverModeForm.salaryMode === '底薪+差费' ? record.baseSalary : record.tripCommission))
   driverModeModalOpen.value = true
 }
 
 async function saveDriverModeConfig() {
+  if (driverModeSaving.value)
+    return
   const record = driverModeEditingRecord.value
   if (!record)
     return
@@ -2691,6 +3161,11 @@ async function saveDriverModeConfig() {
   const snapshot = { ...record }
   const previousMode = String(record.salaryMode || '固定月薪')
   const previousAmount = formatPlainAmount(toNumber(record.modeAmount))
+  const effectiveDate = String(driverModeForm.modeEffectiveDate || '')
+  if (!dayjs(effectiveDate).isValid()) {
+    message.warning('请选择模式生效日期')
+    return
+  }
   record.salaryMode = driverModeForm.salaryMode
   record.modeAmount = formatPlainAmount(toNumber(driverModeForm.modeAmount))
   const plates = displayDriverPlateNos(driverModeForm).filter(item => item !== '-')
@@ -2703,19 +3178,26 @@ async function saveDriverModeConfig() {
   record.plateStartDates = JSON.stringify(driverModeForm.plateStartDates)
   record.owner = `${record.plateNos} / ${record.financeMonth || ''}`
   record.manualPlateNos = 'true'
-  if (previousMode !== record.salaryMode || previousAmount !== record.modeAmount) {
+  const financialMonthStart = getDriverFinancialMonthStart(record)
+  if (previousMode !== record.salaryMode || previousAmount !== record.modeAmount || effectiveDate !== record.modeStartDate) {
     const history = parseSalaryModeHistory({ ...record, salaryMode: previousMode, modeAmount: previousAmount })
-      .filter(item => item.startDate !== todayAttendanceDate.value)
-    history.push({ mode: record.salaryMode, startDate: todayAttendanceDate.value, amount: record.modeAmount })
+      .filter(item => item.startDate !== effectiveDate)
+    const hasEarlierDifferentMode = history.some(item => item.startDate < effectiveDate && normalizeSalaryMode(item.mode) !== normalizeSalaryMode(record.salaryMode))
+    if (effectiveDate > financialMonthStart && !hasEarlierDifferentMode) {
+      const openingAmount = formatPlainAmount(toNumber(record.baseSalary || previousAmount))
+      history.splice(0, history.length, { mode: '固定月薪', startDate: financialMonthStart, amount: openingAmount })
+    }
+    history.push({ mode: record.salaryMode, startDate: effectiveDate, amount: record.modeAmount })
     history.sort((a, b) => a.startDate.localeCompare(b.startDate))
     record.salaryModeHistory = JSON.stringify(history)
-    record.modeStartDate = todayAttendanceDate.value
+    record.modeStartDate = effectiveDate
   }
-  if (record.salaryMode.includes('固定'))
+  if (record.salaryMode.includes('固定') || record.salaryMode === '底薪+差费')
     record.baseSalary = record.modeAmount
   else
     record.tripCommission = record.modeAmount
   recalculateDriverPayroll(record)
+  driverModeSaving.value = true
   try {
     await nextTick()
     await flushTransportOperationData()
@@ -2725,6 +3207,9 @@ async function saveDriverModeConfig() {
   catch (error: any) {
     Object.assign(record, snapshot)
     message.error(error?.message || '司机计薪配置保存失败')
+  }
+  finally {
+    driverModeSaving.value = false
   }
 }
 
@@ -2754,13 +3239,14 @@ async function setAttendanceDate(record: Record<string, any>, date: string, atte
     return
   }
 
-  if (attended && record.modeStartDate && dayjs(date).isBefore(dayjs(record.modeStartDate), 'day')) {
+  if (attended && !getSalaryModeForDate(record, date)) {
     message.warning('所选日期早于计薪模式生效日期')
     return
   }
 
-  if (attended && hasDuplicatePlateAttendance(record, date)) {
-    message.warning(`同一车号当天已有其他${record.crewRole || '司机'}考勤`)
+  const duplicatePlate = attended ? findDuplicatePlateAttendance(record, date) : ''
+  if (duplicatePlate) {
+    message.warning(`${duplicatePlate} 在 ${date} 已登记司机考勤，同一天不能重复`)
     return
   }
 
@@ -2792,15 +3278,38 @@ async function markTodayAttendance(record: Record<string, any>, attended = true)
 }
 
 function recalculateDriverPayroll(record: Record<string, any>) {
-  const mode = String(record.salaryMode || '')
-  const attendanceDays = Math.min(31, Math.max(0, toNumber(record.attendanceDays)))
-  const modeAmount = toNumber(record.modeAmount || (mode.includes('固定') ? record.baseSalary : record.tripCommission))
+  const mode = normalizeSalaryMode(record.salaryMode)
+  const modeAmount = toNumber(record.modeAmount || (mode.includes('固定') || mode === '底薪+差费' ? record.baseSalary : record.tripCommission))
   const allowance = toNumber(record.allowance)
   const deduction = toNumber(record.deduction)
+  const attendanceDates = [...parseAttendanceDates(record)]
+    .filter(date => getSalaryModeForDate(record, date))
+    .sort()
+  const activeModes = new Map<string, SalaryModeHistoryItem>()
+  let fixedPay = 0
+  let variablePay = 0
+  attendanceDates.forEach((date) => {
+    const activeMode = getSalaryModeForDate(record, date)
+    if (!activeMode)
+      return
+    const normalizedMode = normalizeSalaryMode(activeMode.mode)
+    activeModes.set(`${normalizedMode}-${activeMode.startDate}`, activeMode)
+    if (normalizedMode.includes('固定') || normalizedMode === '底薪+差费')
+      fixedPay += toNumber(activeMode.amount) / 30
+  })
+  activeModes.forEach((activeMode) => {
+    const normalizedMode = normalizeSalaryMode(activeMode.mode)
+    if (!normalizedMode.includes('固定') && normalizedMode !== '底薪+差费')
+      variablePay += toNumber(activeMode.amount)
+  })
+  fixedPay = Math.round(fixedPay * 100) / 100
+  variablePay = Math.round(variablePay * 100) / 100
+  const orderExtraFee = getDriverOrderExtraFee(record)
+  record.salaryMode = mode
   record.modeAmount = formatPlainAmount(modeAmount)
-  const modePay = mode.includes('固定')
-    ? Math.round((modeAmount / 30) * attendanceDays * 100) / 100
-    : modeAmount
+  const modePay = fixedPay + variablePay + orderExtraFee
+  record.baseSalary = formatPlainAmount(fixedPay)
+  record.tripCommission = formatPlainAmount(variablePay + orderExtraFee)
   const grossSalary = Math.max(0, modePay + allowance)
   const netSalary = Math.max(0, grossSalary - deduction)
 
@@ -2809,6 +3318,41 @@ function recalculateDriverPayroll(record: Record<string, any>) {
   record.amount = record.netSalary
   if (!String(record.status || '').includes('已发放'))
     record.status = '核算中'
+}
+
+function getDriverSalaryComposition(record: Record<string, any>) {
+  const mode = normalizeSalaryMode(record.salaryMode)
+  const amount = formatPlainAmount(toNumber(record.modeAmount))
+  if (mode === '底薪+差费')
+    return `底薪 ${amount} + 运单差费 ${formatPlainAmount(getDriverOrderExtraFee(record))}`
+  if (mode === '市区倒短固定工资')
+    return `固定金额 ${amount}`
+  if (mode === '固定月薪')
+    return `固定金额 ${amount}`
+  return `模式金额 ${amount}`
+}
+
+function recalculateAllDriverPayroll() {
+  transportDriverPayrollRows.value
+    .filter(record => String(record.crewRole || '司机').includes('司机'))
+    .forEach(record => recalculateDriverPayroll(record))
+}
+
+function getDriverOrderExtraFee(record: Record<string, any>) {
+  const driverName = String(record.name || '').replace(/\s+/g, '')
+  const financeMonth = normalizeMonthKey(record.financeMonth)
+  if (!driverName || !financeMonth)
+    return 0
+
+  return orderRows.value.reduce((total, order) => {
+    const orderDriver = String(order.driver || '').replace(/\s+/g, '')
+    const orderMonth = normalizeMonthKey(order.financeMonth || order.month || order.shipDate)
+    const orderDate = dayjs(order.shipDate || order.updatedAt)
+    const activeMode = orderDate.isValid() ? getSalaryModeForDate(record, orderDate.format('YYYY-MM-DD')) : undefined
+    return orderDriver === driverName && orderMonth === financeMonth && normalizeSalaryMode(activeMode?.mode) === '底薪+差费'
+      ? total + toNumber(order.extraFee)
+      : total
+  }, 0)
 }
 
 function openGpsMonitor(record: Record<string, string>) {
@@ -2867,15 +3411,9 @@ function buildOrderSummary(rows: TransportOrderRecord[]): OrderSummary {
 
 function applyOrderRecords(summary: OrderSummary) {
   const normalizedSummary = buildOrderSummary(summary.rows)
-  const invalidRows = normalizedSummary.rows.filter(row => requiresTransportCrewBinding(row.shipDate) && (!row.driver || !row.escort))
-  if (invalidRows.length) {
-    const sampleCodes = invalidRows.slice(0, 3).map(row => row.code).join('、')
-    message.warning(`2026-07-15起的运单必须绑定司机和押运员：${sampleCodes}${invalidRows.length > 3 ? ` 等${invalidRows.length}条` : ''}`)
-    return
-  }
   orderRows.value = mergeTransportRecords(orderRows.value, normalizedSummary.rows)
+  recalculateAllDriverPayroll()
   syncTransportCustomersFromOrders()
-  syncTransportRoutesFromOrders()
   baseDataVersion.value += 1
   orderImportSummary.value = buildOrderSummary(orderRows.value)
 }
@@ -3026,22 +3564,19 @@ function openOrderModal() {
 }
 
 async function submitOrderForm() {
+  if (orderSaving.value)
+    return
   if (!orderForm.code || !orderForm.plateNo || !orderForm.routeLine) {
     message.warning('请至少填写订单编号、车辆和路线')
     return
   }
-  if (requiresTransportCrewBinding(orderForm.shipDate) && (!orderForm.driver || !orderForm.escort)) {
-    message.warning('请先在基础资料中为该车辆绑定司机和押运员')
-    return
-  }
-
   orderForm.financeMonth = normalizeFinanceMonth(orderForm.financeMonth, orderForm.shipDate)
   orderForm.sentWeight = formatOrderWeight(orderForm.sentWeight)
   orderForm.receivedWeight = formatOrderWeight(orderForm.receivedWeight)
   const snapshot = {
-    orders: structuredClone(orderRows.value),
-    customers: structuredClone(transportBaseCustomerRows.value),
-    routes: structuredClone(transportBaseRouteRows.value),
+    orders: cloneDeep(orderRows.value),
+    customers: cloneDeep(transportBaseCustomerRows.value),
+    routes: cloneDeep(transportBaseRouteRows.value),
   }
   const newOrder = decorateOrderRecord({ ...orderForm })
   if (editingOrderCode.value) {
@@ -3052,10 +3587,11 @@ async function submitOrderForm() {
   else {
     orderRows.value = [newOrder, ...orderRows.value]
   }
+  recalculateAllDriverPayroll()
   syncTransportCustomersFromOrders()
-  syncTransportRoutesFromOrders()
   baseDataVersion.value += 1
   orderImportSummary.value = buildOrderSummary(orderRows.value)
+  orderSaving.value = true
   try {
     await nextTick()
     await flushTransportOperationData()
@@ -3068,6 +3604,9 @@ async function submitOrderForm() {
     transportBaseCustomerRows.value.splice(0, transportBaseCustomerRows.value.length, ...snapshot.customers)
     transportBaseRouteRows.value.splice(0, transportBaseRouteRows.value.length, ...snapshot.routes)
     message.error(error?.message || '运单保存失败，已恢复修改前数据')
+  }
+  finally {
+    orderSaving.value = false
   }
 }
 
@@ -3563,45 +4102,6 @@ function _parseEtcRowsFromPdfText(text: string, file: File): EtcRecord[] {
 
 void _parseEtcRowsFromPdfText
 
-function parseEtcSummaryInvoiceStrict(text: string, file: File): EtcRecord[] {
-  const compactText = text.slice(0, 250_000).replace(/\s+/g, ' ')
-  const invoiceNo = matchPdfText(compactText, [
-    /\*\s*(\d{16,})/,
-    /\d{1,2}\s+\*\s+(\d{16,})\s+[\d,]+(?:\.\d{1,2})?/,
-  ])
-  const plateNo = matchPdfText(compactText, [
-    /(?:车牌号码|车牌号|车牌|车辆)\s*(?:[:：]\s*)?([\u4E00-\u9FA5]\s*[A-Z](?:\s*[A-Z0-9·\-.]){4,8})/i,
-  ]).replace(/\s+/g, '').replace(/[.。-]/g, '·')
-  const cardNo = matchPdfText(compactText, [
-    /(?:ETC卡号|通行卡号|卡号)\s*(?:[:：]\s*)?([A-Z0-9*\-]{5,})/i,
-  ])
-  const stations = [...compactText.matchAll(/([\u4E00-\u9FA5]·(?:[\u4E00-\u9FA5]+\s*){1,10}收\s*费\s*站(?:入口|出口)?)/g)]
-    .map(match => match[1].replace(/\s+/g, '').replace(/(?:收费站)?(?:入口|出口)$/, '收费站'))
-  const splitRows = [...compactText.matchAll(/(?:^|\s)(\d{1,2})\s+至\s+(\d+(?:,\d{3})*\.\d{2})\s+\2(?=\s|$)/g)]
-  const rawDates = [...compactText.matchAll(/(?:^|\s)(20\d{6})(?=\s|$)/g)]
-    .map(match => match[1])
-
-  const count = splitRows.length
-  if (!compactText.includes('出入口信息') || count < 2)
-    throw new Error('未识别到ETC汇总票据的出入口明细表')
-  if (stations.length !== count * 2)
-    throw new Error(`收费站数量异常：识别到${stations.length}个，${count}条行程应有${count * 2}个`)
-  if (rawDates.length < count * 2)
-    throw new Error(`通行日期数量异常：识别到${rawDates.length}个，${count}条拆分明细应有${count * 2}个日期单元`)
-
-  return splitRows.map((matched, index) => normalizeEtcRecord({
-    编号: `${invoiceNo || `PDF-${file.name.replace(/\W+/g, '').slice(0, 16)}`}-${matched[1]}`,
-    通行时间: `${rawDates[index * 2].slice(0, 4)}-${rawDates[index * 2].slice(4, 6)}-${rawDates[index * 2].slice(6, 8)}`,
-    入口信息: stations[index * 2],
-    出口信息: stations[index * 2 + 1],
-    车牌号: plateNo,
-    发票号码: invoiceNo,
-    ETC卡号: cardNo,
-    金额: normalizePdfAmount(matched[2]),
-    状态: '已导入',
-  }, index))
-}
-
 function parseFuelRowsFromPdfText(text: string, file: File): FuelRecord[] {
   const boundedText = text.slice(0, 250_000)
   const compactText = boundedText.replace(/\s+/g, ' ')
@@ -3678,10 +4178,10 @@ function buildEtcSummary(rows: EtcRecord[]): EtcSummary {
   const dates = normalizedRows.map(row => row.updatedAt).filter(Boolean).sort()
   const invoiceNos = [...new Set(normalizedRows.map(row => row.invoiceNo).filter(Boolean))]
   const plateNos = [...new Set(normalizedRows.map(row => row.plateNo).filter(Boolean))]
-  const totalAmount = normalizedRows.reduce((sum, row) => sum + toNumber(row.amount), 0)
+  const totalAmountInCents = normalizedRows.reduce((sum, row) => sum + (parseEtcAmountInCents(row.amount) ?? 0), 0)
 
   return {
-    summaryNo: normalizedRows[0]?.code?.split('-')[0] || '',
+    summaryNo: normalizedRows[0]?.summaryNo || '',
     applyDate: dayjs().format('YYYY-MM-DD'),
     plateNo: plateNos.length === 1 ? plateNos[0] : (plateNos.length ? `${plateNos.length} 辆` : ''),
     buyerName: '',
@@ -3689,7 +4189,7 @@ function buildEtcSummary(rows: EtcRecord[]): EtcSummary {
     invoiceNo: invoiceNos.length === 1 ? invoiceNos[0] : (invoiceNos.length ? `${invoiceNos.length} 张发票` : ''),
     invoiceCount: invoiceNos.length,
     tripCount: normalizedRows.length,
-    totalAmount: formatFuelAmount(totalAmount),
+    totalAmount: formatEtcAmountFromCents(totalAmountInCents),
     monthRange: formatFiscalMonthSummary(months),
     dateRange: dates.length > 1 ? `${dates[0]} 至 ${dates[dates.length - 1]}` : (dates[0] || '-'),
     rows: normalizedRows,
@@ -3698,18 +4198,13 @@ function buildEtcSummary(rows: EtcRecord[]): EtcSummary {
 
 function applyEtcInvoice(summary: EtcSummary) {
   const normalizedSummary = buildEtcSummary(summary.rows)
-  const incomingCodes = new Set(normalizedSummary.rows.map(row => row.code))
-  const incomingInvoiceNos = new Set(normalizedSummary.rows.map(row => row.invoiceNo).filter(Boolean))
-  etcRows.value = [
-    ...normalizedSummary.rows,
-    ...etcRows.value.filter(row => !incomingCodes.has(row.code) && (!row.invoiceNo || !incomingInvoiceNos.has(row.invoiceNo))),
-  ]
+  etcRows.value = [...normalizedSummary.rows, ...etcRows.value]
   etcImportSummary.value = buildEtcSummary(etcRows.value as EtcRecord[])
 }
 
 async function readEtcRowsFromFile(file: File) {
   if (/\.pdf$/i.test(file.name)) {
-    const rows = parseEtcSummaryInvoiceStrict(await extractTransportPdfText(file), file)
+    const rows = parseEtcSummaryInvoiceStrict(await extractTransportPdfText(file))
     if (!rows.length)
       throw new Error('PDF中未识别到票据号码、日期、金额等ETC费用字段')
     return rows
@@ -3717,6 +4212,20 @@ async function readEtcRowsFromFile(file: File) {
 
   const sheetRows = (await parseTransportWorkbook(file)).flatMap(sheet => sheet.rows)
   return normalizeEtcRows(sheetRows)
+}
+
+async function mapWithConcurrency<T, R>(items: T[], concurrency: number, mapper: (item: T, index: number) => Promise<R>) {
+  const results: R[] = []
+  let nextIndex = 0
+  const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    while (nextIndex < items.length) {
+      const index = nextIndex
+      nextIndex += 1
+      results[index] = await mapper(items[index], index)
+    }
+  })
+  await Promise.all(workers)
+  return results
 }
 
 async function importEtcInvoicesFromFiles(files: File[]) {
@@ -3731,12 +4240,38 @@ async function importEtcInvoicesFromFiles(files: File[]) {
     columns: getImportPreviewColumns('etc'),
   })
 
-  const parsed = await Promise.all(fileList.map(async (file) => {
+  const existingFileHashes = new Set(etcRows.value.map(row => row.sourceFileHash).filter(Boolean))
+  const existingSummaryNos = new Set(etcRows.value.map(row => row.summaryNo || row.code).filter(Boolean))
+  const batchFileHashes = new Set<string>()
+  const batchSummaryNos = new Set<string>()
+  const duplicateFiles: string[] = []
+  const parsed = await mapWithConcurrency(fileList, 4, async (file) => {
     try {
+      const sourceFileHash = await getTransportFileContentHash(file)
+      if (existingFileHashes.has(sourceFileHash) || batchFileHashes.has(sourceFileHash)) {
+        duplicateFiles.push(`${file.name} 已上传过，禁止重复上传`)
+        return { file, rows: [] as EtcRecord[], error: '', duplicate: true }
+      }
+      batchFileHashes.add(sourceFileHash)
+      const fileRows = await readEtcRowsFromFile(file)
+      const summaryNo = fileRows[0]?.summaryNo
+      if (!summaryNo)
+        throw new Error('未识别到汇总单号')
+      if (existingSummaryNos.has(summaryNo) || batchSummaryNos.has(summaryNo)) {
+        duplicateFiles.push(`${file.name}：汇总单号 ${summaryNo} 已存在，禁止重复导入`)
+        return { file, rows: [] as EtcRecord[], error: '', duplicate: true }
+      }
+      batchSummaryNos.add(summaryNo)
       return {
         file,
-        rows: await readEtcRowsFromFile(file),
+        rows: fileRows.map((row, index) => ({
+          ...row,
+          sourceFileHash,
+          sourceFileName: file.name,
+          sourceFileRow: String(index + 1),
+        })),
         error: '',
+        duplicate: false,
       }
     }
     catch (error: any) {
@@ -3744,12 +4279,13 @@ async function importEtcInvoicesFromFiles(files: File[]) {
         file,
         rows: [] as EtcRecord[],
         error: `${file.name}：${error?.message ?? '解析失败'}`,
+        duplicate: false,
       }
     }
-  }))
+  })
   const rows = parsed.flatMap(item => item.rows)
   const errors = parsed
-    .filter(item => !item.rows.length || item.error)
+    .filter(item => !item.duplicate && (!item.rows.length || item.error))
     .map(item => item.error || `${item.file.name}：未识别到发票号、车牌、通行时间、路段、金额等ETC费用明细字段`)
 
   if (!rows.length) {
@@ -3760,6 +4296,8 @@ async function importEtcInvoicesFromFiles(files: File[]) {
       fileSize,
       rows: [],
       errorDetails: errors,
+      duplicateDetails: duplicateFiles,
+      deduplicateRows: false,
     })
     return
   }
@@ -3771,20 +4309,23 @@ async function importEtcInvoicesFromFiles(files: File[]) {
     fileName: fileName ?? '导入文件',
     fileSize,
     rows: summary.rows,
+    summaryNo: [...new Set(summary.rows.map(row => row.summaryNo).filter(Boolean))].join('、'),
     errorDetails: errors,
+    duplicateDetails: duplicateFiles,
+    deduplicateRows: false,
     apply: selectedRows => applyEtcInvoice(buildEtcSummary(selectedRows as EtcRecord[])),
   })
 }
 
 function getFileQueueKey(file: File) {
-  return `${file.name}_${file.size}_${file.lastModified}`
+  return `${file.webkitRelativePath || file.name}_${file.size}_${file.lastModified}`
 }
 
-function applyFuelRecords(summary: FuelSummary) {
-  const normalizedSummary = buildFuelSummary(summary.rows)
-  const incomingCodes = new Set(normalizedSummary.rows.map(row => row.code))
-  fuelRows.value = [...normalizedSummary.rows, ...fuelRows.value.filter(row => !incomingCodes.has(row.code))]
+async function persistFuelRecords(rows: FuelRecord[]) {
+  await importTransportFuelApi(rows)
+  await loadTransportOperationData({ force: true })
   fuelImportSummary.value = buildFuelSummary(fuelRows.value)
+  refreshModuleList()
 }
 
 async function readFuelRowsFromFile(file: File) {
@@ -3821,8 +4362,29 @@ async function importFuelRecordsFromFiles(files: File[]) {
     fileSize,
     rows: summary.rows,
     errorDetails: errors,
-    apply: rows.length ? selectedRows => applyFuelRecords(buildFuelSummary(selectedRows as FuelRecord[])) : undefined,
+    apply: rows.length ? selectedRows => persistFuelRecords(selectedRows as FuelRecord[]) : undefined,
+    persist: false,
   })
+}
+
+async function saveManualRecord(payload: Record<string, string | number>) {
+  if (route.name !== 'TransportFuel')
+    return
+  manualRecordSaving.value = true
+  try {
+    await createTransportFuelRecordApi(payload as unknown as TransportFuelCreatePayload)
+    await loadTransportOperationData({ force: true })
+    fuelImportSummary.value = buildFuelSummary(fuelRows.value)
+    manualRecordOpen.value = false
+    refreshModuleList()
+    message.success('加油明细新增成功')
+  }
+  catch (error: any) {
+    message.error(error?.message || '加油明细新增失败')
+  }
+  finally {
+    manualRecordSaving.value = false
+  }
 }
 
 watch(
@@ -3834,7 +4396,10 @@ watch(
 watch(
   () => route.name,
   () => {
-    if (route.name === 'TransportOrders') {
+    // Each transport submodule has its own status vocabulary; never carry a
+    // stale filter value such as "待处理" into the four-stage order view.
+    queryModel.status = undefined
+    if (route.name !== 'TransportBaseData') {
       const currentMonth = getCurrentFinancialMonthRange()
       resetFinancialPeriodFilter({
         financialYear: Number(currentMonth.key.slice(0, 4)),
@@ -3924,23 +4489,11 @@ function displayVehicleValue(value?: string) {
 <template>
   <page-container>
     <section class="transport-overview-panel">
-      <a-row :gutter="[12, 12]" align="middle">
-        <a-col :xs="24" :md="8" :xl="6">
-          <div class="transport-page-title">
-            {{ pageTitle }}
-          </div>
-          <div class="transport-page-description">
-            {{ activeProfile.description }}
-          </div>
-        </a-col>
-        <a-col :xs="24" :md="16" :xl="18">
-          <SummaryCards :cards="moduleSummaryCards" :loading="summaryLoading" compact />
-        </a-col>
-      </a-row>
+      <SummaryCards :cards="moduleSummaryCards" :loading="summaryLoading" :data-state="moduleSummaryCards.some(card => card.dataState === 'empty') ? 'empty' : 'ready'" compact />
     </section>
 
     <a-card class="transport-query-card" :bordered="false">
-      <a-form class="transport-module-query" :model="queryModel">
+      <a-form class="transport-module-query" :model="queryModel" @finish="handleQuery">
         <a-row :gutter="[10, 8]" align="middle">
           <template v-if="route.name === 'TransportBaseData'">
             <a-col
@@ -3970,15 +4523,31 @@ function displayVehicleValue(value?: string) {
           <a-col v-if="route.name !== 'TransportBaseData'" :xs="24" :md="8" :xl="route.name === 'TransportOrders' ? 2 : 3">
             <a-form-item label="状态">
               <a-select v-model:value="queryModel.status" allow-clear :popup-match-select-width="false" :dropdown-style="{ minWidth: '120px' }" placeholder="请选择状态">
-                <a-select-option value="pending">
-                  待处理
-                </a-select-option>
-                <a-select-option value="running">
-                  处理中
-                </a-select-option>
-                <a-select-option value="done">
-                  已完成
-                </a-select-option>
+                <template v-if="route.name === 'TransportOrders'">
+                  <a-select-option value="loading">
+                    装车
+                  </a-select-option>
+                  <a-select-option value="unloading">
+                    卸车
+                  </a-select-option>
+                  <a-select-option value="transit">
+                    运输中
+                  </a-select-option>
+                  <a-select-option value="returning">
+                    空返
+                  </a-select-option>
+                </template>
+                <template v-else>
+                  <a-select-option value="pending">
+                    待处理
+                  </a-select-option>
+                  <a-select-option value="running">
+                    处理中
+                  </a-select-option>
+                  <a-select-option value="done">
+                    已完成
+                  </a-select-option>
+                </template>
               </a-select>
             </a-form-item>
           </a-col>
@@ -4014,7 +4583,6 @@ function displayVehicleValue(value?: string) {
             v-if="route.name !== 'TransportBaseData'"
             v-model="financialPeriodFilter"
             :available-month-keys="availableFinancialMonthKeys"
-            :show-month-range="route.name === 'TransportOrders'"
             :year-col="{ xs: 24, md: 8, xl: route.name === 'TransportOrders' ? 3 : 4 }"
             :month-col="{ xs: 24, md: 8, xl: route.name === 'TransportOrders' ? 3 : 4 }"
             :date-col="{ xs: 24, md: 8, xl: route.name === 'TransportOrders' ? 5 : 6 }"
@@ -4022,7 +4590,7 @@ function displayVehicleValue(value?: string) {
           <a-col :xs="24" :md="8" :xl="3">
             <a-form-item class="query-actions">
               <a-space class="query-action-space">
-                <a-button type="primary" @click="handleQuery">
+                <a-button type="primary" html-type="submit">
                   查询
                 </a-button>
                 <a-button @click="resetQuery">
@@ -4034,6 +4602,9 @@ function displayVehicleValue(value?: string) {
         </a-row>
       </a-form>
     </a-card>
+
+    <TransportOrderAnalytics v-if="route.name === 'TransportOrders'" :rows="tableRows" />
+    <TransportSubmoduleAnalytics v-else :module-name="String(route.name || '')" :rows="tableRows" />
 
     <BaseDataTable
       v-if="route.name === 'TransportBaseData'"
@@ -4085,9 +4656,11 @@ function displayVehicleValue(value?: string) {
       :is-money-column="isDriverPayrollMoneyColumn"
       :is-stat-column="isDriverPayrollStatColumn"
       :get-column-value="getColumnRecordValue"
+      :get-salary-composition="getDriverSalaryComposition"
       :get-actions="getBusinessActions"
       @export="exportCurrentRows"
       @configure-mode="openDriverModeConfig"
+      @save-global-mode="saveGlobalSalaryMode"
       @toggle-attendance="toggleAttendanceDate"
       @mark-attendance="markTodayAttendance"
     />
@@ -4114,22 +4687,56 @@ function displayVehicleValue(value?: string) {
       :display-table-value="displayTableValue"
       @import-batch="openBatchFilePicker"
       @export="exportCurrentRows"
-      @add="openOrderModal"
+      @add="openAddRecord"
       @open-gps="openGpsMonitor"
     />
 
     <DriverModeModal
+      v-if="driverModeModalOpen"
       v-model:open="driverModeModalOpen"
       :form="driverModeForm"
       :vehicle-options="driverPayrollVehicleOptions"
       :plate-nos="displayDriverPlateNos(driverModeForm)"
+      :mode-amounts="driverSalaryModeAmountMap"
       :get-mode-class="getSalaryModeClass"
+      :submitting="driverModeSaving"
       @save="saveDriverModeConfig"
       @add-plate="addDriverPlateNo"
       @remove-plate="removeDriverPlateNo"
     />
 
+    <a-modal
+      v-model:open="businessEditOpen"
+      :title="`编辑${pageTitle}`"
+      width="720px"
+      :confirm-loading="businessEditSaving"
+      :mask-closable="false"
+      :closable="!businessEditSaving"
+      :keyboard="!businessEditSaving"
+      :cancel-button-props="{ disabled: businessEditSaving }"
+      ok-text="保存"
+      @ok="saveBusinessEdit"
+    >
+      <a-form layout="vertical">
+        <a-row :gutter="16">
+          <a-col v-for="field in businessEditFields" :key="field.key" :xs="24" :md="12">
+            <a-form-item :label="field.label" required>
+              <a-date-picker
+                v-if="field.type === 'date'"
+                v-model:value="businessEditForm[field.key]"
+                value-format="YYYY-MM-DD"
+                format="YYYY-MM-DD"
+                class="full-width"
+              />
+              <a-input v-else v-model:value="businessEditForm[field.key]" />
+            </a-form-item>
+          </a-col>
+        </a-row>
+      </a-form>
+    </a-modal>
+
     <BaseDataModal
+      v-if="baseDataModalOpen"
       v-model:open="baseDataModalOpen"
       v-model:route-validity-range="baseRouteValidityRange"
       :title="`${baseDataEditingCode ? '编辑' : '新增'}${activeBaseDataTabConfig.title}`"
@@ -4155,6 +4762,10 @@ function displayVehicleValue(value?: string) {
       :body-style="{ maxHeight: 'calc(100vh - 146px)', overflowY: 'auto', padding: '0 18px 8px' }"
       wrap-class-name="order-entry-modal"
       :mask-closable="false"
+      :confirm-loading="orderSaving"
+      :closable="!orderSaving"
+      :keyboard="!orderSaving"
+      :cancel-button-props="{ disabled: orderSaving }"
       ok-text="保存"
       cancel-text="取消"
       @ok="submitOrderForm"
@@ -4185,7 +4796,7 @@ function displayVehicleValue(value?: string) {
 
         <section class="order-form-section">
           <div class="section-heading">
-            核心信息
+            基础信息
           </div>
           <a-row :gutter="[16, 8]">
             <a-col :xs="24" :md="8">
@@ -4265,22 +4876,22 @@ function displayVehicleValue(value?: string) {
 
         <section class="order-form-section">
           <div class="section-heading">
-            运输与金额
+            货运信息
           </div>
           <a-row :gutter="[16, 8]">
             <a-col :xs="24" :md="8">
               <a-form-item label="货物实发重量(吨)" required>
-                <a-input v-model:value="orderForm.sentWeight" inputmode="decimal" />
+                <business-input-number v-model:value="orderForm.sentWeight" class="w-full" string-mode :min="0" :precision="2" />
               </a-form-item>
             </a-col>
             <a-col :xs="24" :md="8">
               <a-form-item label="货物实收重量(吨)" required>
-                <a-input v-model:value="orderForm.receivedWeight" inputmode="decimal" />
+                <business-input-number v-model:value="orderForm.receivedWeight" class="w-full" string-mode :min="0" :precision="2" />
               </a-form-item>
             </a-col>
             <a-col :xs="24" :md="8">
               <a-form-item label="运距(km)" required>
-                <a-input v-model:value="orderForm.mileage" inputmode="decimal" placeholder="请输入运输距离" />
+                <business-input-number v-model:value="orderForm.mileage" class="w-full" string-mode :min="0" :precision="2" placeholder="请输入运输距离" />
               </a-form-item>
             </a-col>
             <a-col :xs="24" :md="8">
@@ -4300,7 +4911,7 @@ function displayVehicleValue(value?: string) {
                 <template #label>
                   {{ orderForm.priceFormula === '吨位×运距×单价' ? '运输单价(元/吨公里)' : '运输单价(元/吨)' }}
                 </template>
-                <a-input v-model:value="orderForm.freightPrice" inputmode="decimal" placeholder="请输入单价或选择路线带入" />
+                <business-input-number v-model:value="orderForm.freightPrice" class="w-full" string-mode :min="0" :precision="4" placeholder="请输入单价或选择路线带入" />
               </a-form-item>
             </a-col>
             <a-col :xs="24" :md="8">
@@ -4318,7 +4929,7 @@ function displayVehicleValue(value?: string) {
 
         <section class="order-form-section">
           <div class="section-heading">
-            路线、地址与财务月
+            车辆人员与路线
           </div>
           <a-row :gutter="[16, 8]">
             <a-col :xs="24" :md="8">
@@ -4361,12 +4972,12 @@ function displayVehicleValue(value?: string) {
 
         <section class="order-form-section">
           <div class="section-heading">
-            附加费用与货损
+            费用结算
           </div>
           <a-row :gutter="[16, 8]">
             <a-col :xs="24" :md="8">
               <a-form-item label="差费(元)">
-                <a-input v-model:value="orderForm.extraFee" placeholder="请先选择路线" @change="syncOrderDerivedAmounts" />
+                <business-input-number v-model:value="orderForm.extraFee" class="w-full" string-mode :min="0" :precision="2" placeholder="请先选择路线" @change="syncOrderDerivedAmounts" />
               </a-form-item>
             </a-col>
             <a-col :xs="24" :md="8">
@@ -4376,17 +4987,17 @@ function displayVehicleValue(value?: string) {
             </a-col>
             <a-col :xs="24" :md="8">
               <a-form-item label="货损单价(元/吨)">
-                <a-input v-model:value="orderForm.lossUnitPrice" @change="syncOrderDerivedAmounts" />
+                <business-input-number v-model:value="orderForm.lossUnitPrice" class="w-full" string-mode :min="0" :precision="2" @change="syncOrderDerivedAmounts" />
               </a-form-item>
             </a-col>
             <a-col :xs="24" :md="8">
               <a-form-item label="货损比例(‰)">
-                <a-input v-model:value="orderForm.lossRate" />
+                <business-input-number v-model:value="orderForm.lossRate" class="w-full" string-mode :min="0" :precision="4" />
               </a-form-item>
             </a-col>
             <a-col :xs="24" :md="8">
               <a-form-item label="货损重量(吨)">
-                <a-input v-model:value="orderForm.lossWeight" @change="syncOrderDerivedAmounts" />
+                <business-input-number v-model:value="orderForm.lossWeight" class="w-full" string-mode :min="0" :precision="3" @change="syncOrderDerivedAmounts" />
               </a-form-item>
             </a-col>
             <a-col :xs="24" :md="8">
@@ -4412,7 +5023,7 @@ function displayVehicleValue(value?: string) {
                 <template #label>
                   实际加油量(L)<span class="auto-summary">（自动汇总）</span>
                 </template>
-                <a-input v-model:value="orderForm.actualFuelVolume" />
+                <business-input-number v-model:value="orderForm.actualFuelVolume" class="w-full" string-mode :min="0" :precision="2" />
               </a-form-item>
             </a-col>
             <a-col :xs="24" :md="8">
@@ -4420,7 +5031,7 @@ function displayVehicleValue(value?: string) {
                 <template #label>
                   加油总价(元)<span class="auto-summary">（自动汇总）</span>
                 </template>
-                <a-input v-model:value="orderForm.actualFuelAmount" />
+                <business-input-number v-model:value="orderForm.actualFuelAmount" class="w-full" string-mode :min="0" :precision="2" />
               </a-form-item>
             </a-col>
             <a-col :span="24">
@@ -4433,17 +5044,15 @@ function displayVehicleValue(value?: string) {
       </a-form>
     </a-modal>
 
-    <a-modal v-model:open="detailOpen" :title="`${pageTitle}详情`" :footer="null" width="760px">
-      <a-descriptions v-if="detailRecord" bordered :column="2" size="small">
-        <a-descriptions-item
-          v-for="([key, value]) in detailEntries"
-          :key="key"
-          :label="getDetailLabel(key)"
-        >
-          {{ value || '-' }}
-        </a-descriptions-item>
-      </a-descriptions>
-    </a-modal>
+    <TransportRecordDetailDrawer
+      v-if="detailOpen"
+      v-model:open="detailOpen"
+      :title="`${pageTitle}详情`"
+      :subtitle="detailRecord ? String(detailRecord.code || detailRecord.name || detailRecord.plateNo || '') : ''"
+      :status="detailRecord ? getDisplayedStatus(detailRecord) : ''"
+      :entries="detailEntries"
+      :get-label="getDetailLabel"
+    />
 
     <a-modal
       v-model:open="batchFilePickerOpen"
@@ -4460,12 +5069,30 @@ function displayVehicleValue(value?: string) {
         :before-upload="addBatchSelectedFiles"
       >
         <p class="ant-upload-text">
-          点击或拖入多个文件
+          点击或拖入单个、多个文件
         </p>
         <p class="ant-upload-hint">
           可重复添加 Excel、CSV、PDF，文件将合并解析
         </p>
       </a-upload-dragger>
+      <div class="batch-folder-picker">
+        <a-button @click="selectBatchFolder">
+          <template #icon>
+            <FolderOpenOutlined />
+          </template>
+          选择文件夹
+        </a-button>
+        <span>将导入文件夹及其子文件夹中的 Excel、CSV、PDF 文件</span>
+        <input
+          ref="batchFolderInput"
+          type="file"
+          accept=".xlsx,.xls,.csv,.pdf"
+          multiple
+          webkitdirectory
+          class="batch-folder-input"
+          @change="addBatchSelectedFolder"
+        >
+      </div>
       <a-list mt-4 bordered :data-source="batchSelectedFiles">
         <template #renderItem="{ item }">
           <a-list-item>
@@ -4480,7 +5107,27 @@ function displayVehicleValue(value?: string) {
       </a-list>
     </a-modal>
 
+    <TransportOperationCreateModal
+      v-if="manualRecordOpen"
+      v-model:open="manualRecordOpen"
+      kind="fuel"
+      :saving="manualRecordSaving"
+      :vehicle-options="transportBaseVehicleRows.map(row => ({ label: row.plateNo || row.code, value: row.plateNo || row.code })).filter(item => item.value)"
+      @submit="saveManualRecord"
+    />
+
+    <a-modal v-model:open="salaryModeSaveResultOpen" width="440px" :footer="null" :closable="false" centered>
+      <a-result :status="salaryModeSaveResult.success ? 'success' : 'error'" :title="salaryModeSaveResult.title" :sub-title="salaryModeSaveResult.detail">
+        <template #extra>
+          <a-button type="primary" @click="salaryModeSaveResultOpen = false">
+            确定
+          </a-button>
+        </template>
+      </a-result>
+    </a-modal>
+
     <ImportConfirmDialog
+      v-if="importPreview.open"
       :state="importPreview"
       @cancel="closeImportPreview"
       @reselect="closeImportPreview"
@@ -4491,6 +5138,18 @@ function displayVehicleValue(value?: string) {
 </template>
 
 <style lang="less" scoped>
+.batch-folder-picker {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  margin-top: 12px;
+  color: rgba(0, 0, 0, 0.65);
+}
+
+.batch-folder-input {
+  display: none;
+}
+
 .order-location-link {
   display: flex;
   flex-direction: column;
@@ -4591,21 +5250,6 @@ function displayVehicleValue(value?: string) {
   :deep(.summary-cards .ant-col) {
     padding-bottom: 0;
   }
-}
-
-.transport-page-title {
-  color: var(--admin-text);
-  font-size: 19px;
-  font-weight: 650;
-  line-height: 1.35;
-}
-
-.transport-page-description {
-  max-width: 520px;
-  margin-top: 4px;
-  color: var(--admin-muted);
-  font-size: 13px;
-  line-height: 1.5;
 }
 
 .base-data-form {
@@ -4803,18 +5447,17 @@ function displayVehicleValue(value?: string) {
 
 .transport-order-table {
   :deep(.ant-table-cell) {
-    white-space: nowrap;
-    word-break: keep-all;
+    overflow-wrap: anywhere;
+    white-space: normal;
   }
 
   :deep(.ant-table-thead > tr > th) {
-    white-space: nowrap;
+    white-space: normal;
   }
 
   :deep(.ant-table-tbody > tr > td) {
-    max-width: 220px;
-    overflow: hidden;
-    text-overflow: ellipsis;
+    overflow: visible;
+    text-overflow: clip;
   }
 
   :deep(.order-fuel-overrun-row > td) {
@@ -4829,12 +5472,12 @@ function displayVehicleValue(value?: string) {
 
 .transport-etc-table {
   :deep(.ant-table) {
-    table-layout: fixed;
+    table-layout: auto;
   }
 
   :deep(.ant-table-cell) {
-    white-space: nowrap;
-    word-break: keep-all;
+    overflow-wrap: anywhere;
+    white-space: normal;
   }
 
   :deep(.ant-table-thead > tr > th),
@@ -4843,8 +5486,8 @@ function displayVehicleValue(value?: string) {
   }
 
   :deep(.ant-table-tbody > tr > td) {
-    overflow: hidden;
-    text-overflow: ellipsis;
+    overflow: visible;
+    text-overflow: clip;
   }
 
   :deep(.table-cell-money) {
@@ -5469,10 +6112,6 @@ function displayVehicleValue(value?: string) {
 @media (max-width: 768px) {
   .transport-overview-panel {
     margin-bottom: 12px;
-  }
-
-  .transport-page-title {
-    font-size: 18px;
   }
 
   .transport-module-query {

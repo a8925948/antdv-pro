@@ -72,9 +72,18 @@ describe('approval store workflow', () => {
 
   it('applies an external approval status to the instance and business record', async () => {
     const submitted = await submit()
-    const result = await approvalStore.applyExternalStatus(submitted.instance.id, 'APPROVED', '企业微信', 'SP-20260713')
+    const latestFlow = [{ status: 'APPROVED', approvers: [{ userId: 'HanPeng', name: '韩鹏', status: 'APPROVED' }] }]
+    const result = await approvalStore.applyExternalStatus(submitted.instance.id, 'APPROVED', '企业微信', 'SP-20260713', {
+      source: '企业微信',
+      approvalFlow: latestFlow,
+    })
 
-    expect(result.instance).toMatchObject({ status: 'APPROVED', businessStatus: 'APPROVAL_APPROVED' })
+    expect(result.instance).toMatchObject({
+      status: 'APPROVED',
+      businessStatus: 'APPROVAL_APPROVED',
+      formSnapshot: { source: '企业微信', approvalFlow: latestFlow },
+      payload: { source: '企业微信', approvalFlow: latestFlow },
+    })
     expect(result.tasks.every(task => task.status !== 'PENDING')).toBe(true)
     expect(result.logs.at(-1)).toMatchObject({ action: 'EXTERNAL_SYNC', operatorName: '企业微信' })
     expect(await approvalStore.listBusinessRecords()).toContainEqual(expect.objectContaining({

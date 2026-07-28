@@ -5,6 +5,7 @@ import * as login from './common/login'
 import * as menu from './common/menu'
 import * as commonUser from './common/user'
 import * as dashboard from './dashboard/analysis'
+import { getExpiryWarningsApi } from './dashboard/expiry-warnings'
 import * as gps from './gps'
 import * as basicList from './list/basic-list'
 import * as crudTable from './list/crud-table'
@@ -12,8 +13,9 @@ import * as tableList from './list/table-list'
 import * as officeVehicle from './office-vehicle'
 import * as system from './system'
 import * as testApi from './test'
+import * as etc from './transport/etc'
 import * as fees from './transport/fees'
-import { getMaintenanceSummaryApi } from './transport/maintenance'
+import * as maintenance from './transport/maintenance'
 import { getTransportModuleSummaryApi } from './transport/summary'
 
 const mocks = vi.hoisted(() => ({
@@ -119,33 +121,33 @@ describe('business API contracts', () => {
 
     const access = { userId: 7, role: 'USER' }
     expectCalls([
-      ['get', '/gps/provider-configs'],
-      ['get', '/gps/vehicles', access],
-      ['get', '/gps/devices'],
+      ['get', '/gps/provider-configs', undefined, { timeout: 45000, errorNotification: false }],
+      ['get', '/gps/vehicles', access, { timeout: 45000, errorNotification: false }],
+      ['get', '/gps/devices', undefined, { timeout: 45000, errorNotification: false }],
       ['post', '/gps/devices/sync', { provider: '808gps' }, { timeout: 45000, errorNotification: true }],
       ['post', '/gps/vehicles/V1/bind-device', { deviceId: 'D1' }],
       ['get', '/gps/locations/latest', access],
       ['post', '/gps/locations/sync', { provider: undefined }, { timeout: 45000, errorNotification: true }],
       ['get', '/gps/vehicles/V1/location'],
-      ['get', '/gps/vehicles/V1/track', { startTime: '2026-01-01' }],
+      ['get', '/gps/vehicles/V1/track', { startTime: '2026-01-01' }, { timeout: 60000, errorNotification: false }],
       ['get', '/gps/alarms', access],
       ['post', '/gps/alarms/sync', { provider: '808gps' }, { timeout: 45000, errorNotification: true }],
       ['get', '/gps/status'],
-      ['get', '/gps/map-data', access],
+      ['get', '/gps/map-data', access, { timeout: 45000, errorNotification: false }],
       ['get', '/gps/geofences'],
-      ['get', '/gps/sync-logs'],
+      ['get', '/gps/sync-logs', undefined, { timeout: 45000, errorNotification: false }],
       ['post', '/gps/alarms/A1/handle', { status: 'handled' }],
       ['post', '/gps/geofences', { name: '仓库', shape: 'circle' }],
       ['put', '/gps/geofences/G1', { enabled: false }],
       ['post', '/gps/geofences/G1/bind-vehicles', { vehicleIds: ['V1'] }],
-      ['get', '/gps/operation-logs'],
+      ['get', '/gps/operation-logs', undefined, { timeout: 45000, errorNotification: false }],
     ])
   })
 
   it('uses administrator access scope for GPS queries', () => {
     mocks.userStore.roles = ['ADMIN']
     gps.getGpsVehiclesApi()
-    expect(mocks.get).toHaveBeenCalledWith('/gps/vehicles', { userId: 7, role: 'ADMIN' })
+    expect(mocks.get).toHaveBeenCalledWith('/gps/vehicles', { userId: 7, role: 'ADMIN' }, { timeout: 45000, errorNotification: false })
   })
 
   it('maps every office vehicle operation', () => {
@@ -153,6 +155,7 @@ describe('business API contracts', () => {
     officeVehicle.getOfficeVehicleSummaryApi(query)
     officeVehicle.getOfficeVehicleListApi(query)
     officeVehicle.saveOfficeVehicleApi({ plateNo: '京A1' })
+    officeVehicle.saveOfficeVehicleBatchApi({ vehicle: { plateNo: '京A2' }, expenses: [] })
     officeVehicle.getOfficeVehicleDetailApi('V1')
     officeVehicle.deleteOfficeVehicleApi('V1')
     officeVehicle.getOfficeVehicleExpenseListApi(query)
@@ -174,6 +177,7 @@ describe('business API contracts', () => {
       ['post', '/office-vehicle/summary', query],
       ['post', '/office-vehicle/vehicles', query],
       ['post', '/office-vehicle/vehicles/save', { plateNo: '京A1' }],
+      ['post', '/office-vehicle/batch-save', { vehicle: { plateNo: '京A2' }, expenses: [] }],
       ['get', '/office-vehicle/vehicles/V1'],
       ['del', '/office-vehicle/vehicles/V1'],
       ['post', '/office-vehicle/expenses', query],
@@ -247,8 +251,15 @@ describe('business API contracts', () => {
     fees.exportRegulatoryFeeApi(query)
     fees.getRegulatoryFeeSummaryApi(query)
     fees.getRegulatoryFeeOverviewApi({ plateNo: '京A1' })
-    getMaintenanceSummaryApi({ records: [{ id: 1 }] })
+    maintenance.getMaintenanceSummaryApi({ records: [{ id: 1 }] })
+    maintenance.createMaintenanceRecordApi({ plateNo: '青H12345' })
+    maintenance.updateMaintenanceRecordApi(1, { plateNo: '青H12345' })
+    maintenance.deleteMaintenanceRecordApi(1)
+    maintenance.importMaintenanceRecordsApi([{ plateNo: '青H12345' }])
+    maintenance.createMaintenanceInventoryApi({ movement: { type: '入库' } })
     getTransportModuleSummaryApi({ moduleName: '订单', rows: [{ id: 1 }] })
+    etc.getTransportEtcPageApi({ current: 1, pageSize: 20, keyword: '青A' })
+    etc.importTransportEtcApi([{ code: 'E1' }])
 
     expectCalls([
       ['post', '/transport/fees', query],
@@ -263,7 +274,21 @@ describe('business API contracts', () => {
       ['post', '/transport/fees/summary', query],
       ['post', '/transport/fees/overview', { plateNo: '京A1' }],
       ['post', '/transport/maintenance/summary', { records: [{ id: 1 }] }],
+      ['post', '/transport/maintenance/create', { plateNo: '青H12345' }],
+      ['put', '/transport/maintenance/1', { plateNo: '青H12345' }],
+      ['del', '/transport/maintenance/1'],
+      ['post', '/transport/maintenance/import', { records: [{ plateNo: '青H12345' }] }],
+      ['post', '/transport/maintenance/inventory', { movement: { type: '入库' } }],
       ['post', '/transport/module/summary', { moduleName: '订单', rows: [{ id: 1 }] }],
+      ['get', '/transport/etc', { current: 1, pageSize: 20, keyword: '青A' }],
+      ['post', '/transport/etc/import', { records: [{ code: 'E1' }] }],
+    ])
+  })
+
+  it('loads the unified dashboard expiry warning feed', () => {
+    getExpiryWarningsApi()
+    expectCalls([
+      ['get', '/dashboard/expiry-warnings'],
     ])
   })
 

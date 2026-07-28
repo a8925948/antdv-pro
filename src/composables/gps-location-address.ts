@@ -48,6 +48,82 @@ export function findNearbyGpsFence(location: GpsLocationLatest | undefined, fenc
     ?.fence
 }
 
+interface GpsFenceRoute {
+  code?: string
+  name?: string
+  loadingAddress?: string
+  unloadingAddress?: string
+}
+
+export type GpsRouteStage = 'loading' | 'unloading'
+
+function normalizeFenceRouteToken(value: unknown) {
+  return String(value ?? '').normalize('NFKC').trim().replace(/[\s·・,，/至到—–-]+/g, '').toLowerCase()
+}
+
+function endpointMatchesFenceAddress(endpoint: string, fenceAddress: string) {
+  if (!endpoint || !fenceAddress)
+    return false
+  return endpoint === fenceAddress
+    || (endpoint.length >= 4 && fenceAddress.includes(endpoint))
+    || (fenceAddress.length >= 4 && endpoint.includes(fenceAddress))
+}
+
+export function filterGpsFencesForRoute(fences: GpsGeofence[], route: GpsFenceRoute | undefined) {
+  if (!route)
+    return []
+
+  const routeCode = normalizeFenceRouteToken(route.code)
+  const routeName = normalizeFenceRouteToken(route.name)
+  const loadingAddress = normalizeFenceRouteToken(route.loadingAddress)
+  const unloadingAddress = normalizeFenceRouteToken(route.unloadingAddress)
+
+  return fences.filter((fence) => {
+    const fenceRouteCode = normalizeFenceRouteToken(fence.routeCode)
+    const fenceRouteName = normalizeFenceRouteToken(fence.routeName)
+    if (routeCode && fenceRouteCode && routeCode === fenceRouteCode)
+      return true
+    if (routeName && fenceRouteName && routeName === fenceRouteName)
+      return true
+
+    const expectedAddress = fence.routeStage === 'loading' ? loadingAddress : fence.routeStage === 'unloading' ? unloadingAddress : ''
+    return endpointMatchesFenceAddress(expectedAddress, normalizeFenceRouteToken(fence.address))
+  })
+}
+
+function mostSpecificAdministrativePlace(value: string) {
+  const matches = [...value.normalize('NFKC').matchAll(/([\u4E00-\u9FFF]{2,12})(?:特别行政区|自治区|自治州|地区|街道|[省市县区旗镇乡])/g)]
+  return normalizeFenceRouteToken(matches.at(-1)?.[1])
+}
+
+function endpointLocationScore(locationAddress: string, endpointAddress: string) {
+  const location = normalizeFenceRouteToken(locationAddress)
+  const endpoint = normalizeFenceRouteToken(endpointAddress)
+  if (!location || !endpoint)
+    return 0
+  if (endpoint.length >= 3 && location.includes(endpoint))
+    return 100 + endpoint.length
+  if (location.length >= 3 && endpoint.includes(location))
+    return 100 + location.length
+
+  // Reverse geocoding normally returns city/county/town. Only the most
+  // specific administrative place is safe enough to distinguish nearby stops.
+  const administrativePlace = mostSpecificAdministrativePlace(locationAddress)
+  if (administrativePlace.length >= 2 && endpoint.includes(administrativePlace))
+    return 80 + administrativePlace.length
+  return 0
+}
+
+export function resolveGpsRouteStageByAddress(locationAddress: string, route: Pick<GpsFenceRoute, 'loadingAddress' | 'unloadingAddress'>): GpsRouteStage | undefined {
+  const loadingScore = endpointLocationScore(locationAddress, String(route.loadingAddress ?? ''))
+  const unloadingScore = endpointLocationScore(locationAddress, String(route.unloadingAddress ?? ''))
+  if (!loadingScore && !unloadingScore)
+    return undefined
+  if (loadingScore === unloadingScore)
+    return undefined
+  return loadingScore > unloadingScore ? 'loading' : 'unloading'
+}
+
 function nearbyFenceName(location: GpsLocationLatest, fences: GpsGeofence[]) {
   return findNearbyGpsFence(location, fences)?.name?.replace(/(?:装车|卸车)?围栏$/, '') || ''
 }

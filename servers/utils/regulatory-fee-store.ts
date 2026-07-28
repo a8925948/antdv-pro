@@ -33,6 +33,8 @@ export interface RegulatoryFeeRecord {
   rejectedAt?: string
   revokedAt?: string
   remark?: string
+  attachmentName?: string
+  attachmentUrl?: string
   createdAt: string
   updatedAt: string
   deletedAt?: string
@@ -58,6 +60,8 @@ export interface RegulatoryFeePayload {
   validStartDate: string
   validEndDate: string
   remark?: string
+  attachmentName?: string
+  attachmentUrl?: string
 }
 
 export interface RegulatoryFeeQuery {
@@ -205,6 +209,8 @@ if (!globalStore.__regulatoryFeeStore) {
 }
 
 const feeStore = globalStore.__regulatoryFeeStore as RegulatoryFeeRecord[]
+let hydrationPromise: Promise<RegulatoryFeeRecord[]> | undefined
+let hydrated = false
 
 if (!isDatabaseRequired() && !getMysqlPool() && !existsSync(dataFile))
   writeDataFile(feeStore)
@@ -256,6 +262,8 @@ interface RegulatoryFeeDbRow {
   rejected_at: Date | string | null
   revoked_at: Date | string | null
   remark: string | null
+  attachment_name: string | null
+  attachment_url: string | null
   created_by: string | number | null
   created_at: Date | string
   updated_at: Date | string
@@ -280,6 +288,8 @@ function mapRegulatoryFeeRow(row: RegulatoryFeeDbRow): RegulatoryFeeRecord {
     rejectedAt: row.rejected_at ? formatDateTime(row.rejected_at) : undefined,
     revokedAt: row.revoked_at ? formatDateTime(row.revoked_at) : undefined,
     remark: row.remark || undefined,
+    attachmentName: row.attachment_name || undefined,
+    attachmentUrl: row.attachment_url || undefined,
     createdAt: formatDateTime(row.created_at),
     updatedAt: formatDateTime(row.updated_at),
     deletedAt: row.deleted_at ? formatDateTime(row.deleted_at) : undefined,
@@ -308,6 +318,8 @@ async function ensureRegulatoryFeeSchema(db: mysql.Pool) {
       rejected_at DATETIME NULL,
       revoked_at DATETIME NULL,
       remark VARCHAR(500) NULL,
+      attachment_name VARCHAR(255) NULL,
+      attachment_url VARCHAR(512) NULL,
       created_by VARCHAR(64) NULL,
       created_at DATETIME NOT NULL,
       updated_at DATETIME NOT NULL,
@@ -318,6 +330,15 @@ async function ensureRegulatoryFeeSchema(db: mysql.Pool) {
       KEY idx_regulatory_fee_approval (approval_status)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
   `)
+  await ensureRegulatoryFeeColumn(db, 'attachment_name', 'VARCHAR(255) NULL')
+  await ensureRegulatoryFeeColumn(db, 'attachment_url', 'VARCHAR(512) NULL')
+}
+
+async function ensureRegulatoryFeeColumn(db: mysql.Pool, column: string, definition: string) {
+  try {
+    await db.query(`ALTER TABLE regulatory_fee ADD COLUMN ${column} ${definition}`)
+  }
+  catch {}
 }
 
 async function loadStoreFromMysql() {
@@ -331,7 +352,7 @@ async function loadStoreFromMysql() {
     SELECT id, fee_name, fee_type, plate_no, trailer_no, area, total_amount,
       valid_start_date, valid_end_date, valid_months, monthly_amortized_amount,
       manual_status, approval_status, approval_instance_id, approved_at, rejected_at,
-      revoked_at, remark, created_by, created_at, updated_at, deleted_at
+      revoked_at, remark, attachment_name, attachment_url, created_by, created_at, updated_at, deleted_at
     FROM regulatory_fee
     ORDER BY created_at DESC, id DESC
   `)
@@ -362,9 +383,9 @@ async function persistStoreToMysql() {
         id, fee_name, fee_type, plate_no, trailer_no, area, total_amount,
         valid_start_date, valid_end_date, valid_months, monthly_amortized_amount,
         manual_status, approval_status, approval_instance_id, approved_at,
-        rejected_at, revoked_at, remark, created_by, created_at, updated_at, deleted_at
+        rejected_at, revoked_at, remark, attachment_name, attachment_url, created_by, created_at, updated_at, deleted_at
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON DUPLICATE KEY UPDATE
         fee_name = VALUES(fee_name),
         fee_type = VALUES(fee_type),
@@ -383,6 +404,8 @@ async function persistStoreToMysql() {
         rejected_at = VALUES(rejected_at),
         revoked_at = VALUES(revoked_at),
         remark = VALUES(remark),
+        attachment_name = VALUES(attachment_name),
+        attachment_url = VALUES(attachment_url),
         created_by = VALUES(created_by),
         created_at = VALUES(created_at),
         updated_at = VALUES(updated_at),
@@ -406,6 +429,8 @@ async function persistStoreToMysql() {
         record.rejectedAt || null,
         record.revokedAt || null,
         record.remark || null,
+        record.attachmentName || null,
+        record.attachmentUrl || null,
         record.createdBy == null ? null : String(record.createdBy),
         record.createdAt,
         record.updatedAt,
@@ -416,9 +441,19 @@ async function persistStoreToMysql() {
 }
 
 async function hydrateRegulatoryFeeStore() {
-  if (await loadStoreFromMysql())
+  if (hydrated)
     return feeStore
-  return syncStoreFromDisk()
+  if (!hydrationPromise) {
+    hydrationPromise = (async () => {
+      if (!(await loadStoreFromMysql()))
+        syncStoreFromDisk()
+      hydrated = true
+      return feeStore
+    })().finally(() => {
+      hydrationPromise = undefined
+    })
+  }
+  return hydrationPromise
 }
 
 function updateRegulatoryFeeApprovalFromCallback(instanceId: string, status: RegulatoryFeeApprovalStatus) {
@@ -674,11 +709,6 @@ function buildRecord(input: Omit<RegulatoryFeeRecord, 'validMonths' | 'monthlyAm
 
 export async function listRegulatoryFees(query: RegulatoryFeeQuery = {}) {
   await hydrateRegulatoryFeeStore()
-  const uniqueVehicles = new Map<string, string | undefined>()
-  feeStore.filter(record => !record.deletedAt && record.plateNo).forEach((record) => {
-    uniqueVehicles.set(normalizePlateNo(record.plateNo), record.area)
-  })
-  await officeVehicleStore.ensureVehiclesFromRegulatoryFees(Array.from(uniqueVehicles, ([plateNo, area]) => ({ plateNo, area })))
   const current = Number(query.current || 1)
   const pageSize = Number(query.pageSize || 10)
   const dateRange = resolveQueryDateRange(query)
@@ -901,6 +931,8 @@ export async function createRegulatoryFee(payload: RegulatoryFeePayload) {
     validEndDate: payload.validEndDate,
     manualStatus: 'enabled',
     remark: payload.remark,
+    attachmentName: payload.attachmentName,
+    attachmentUrl: payload.attachmentUrl,
     createdAt: now(),
     updatedAt: now(),
     createdBy: 1,
@@ -950,6 +982,8 @@ export async function importRegulatoryFees(payloads: RegulatoryFeePayload[]) {
     validEndDate: payload.validEndDate,
     manualStatus: 'enabled',
     remark: payload.remark,
+    attachmentName: payload.attachmentName,
+    attachmentUrl: payload.attachmentUrl,
     createdAt: now(),
     updatedAt: now(),
     createdBy: 1,
@@ -990,6 +1024,8 @@ export async function updateRegulatoryFee(id: number, payload: RegulatoryFeePayl
     validStartDate: payload.validStartDate,
     validEndDate: payload.validEndDate,
     remark: payload.remark,
+    attachmentName: payload.attachmentName,
+    attachmentUrl: payload.attachmentUrl,
     updatedAt: now(),
   })
 

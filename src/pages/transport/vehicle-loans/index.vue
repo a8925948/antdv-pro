@@ -11,12 +11,17 @@ import {
   SearchOutlined,
 } from '@ant-design/icons-vue'
 import dayjs from 'dayjs'
+import { cloneDeep } from 'lodash-es'
 import { computed, reactive, ref, shallowRef, watch } from 'vue'
 import * as XLSX from 'xlsx'
 import { getApprovalInstancesApi, submitApprovalApi } from '~@/api/approval'
+import BusinessDetailDrawer from '~@/components/business-detail-drawer/index.vue'
 import SummaryCards from '~@/components/summary-cards/index.vue'
-import { flushTransportOperationData, transportOperationError, transportOperationLoading, transportVehicleLoanRows } from '~@/composables/transport-operation-data'
+import { useBusinessDictionaries } from '~@/composables/business-dictionaries'
+import { flushTransportOperationData, transportBaseVehicleRows, transportOperationError, transportOperationLoading, transportVehicleLoanRows } from '~@/composables/transport-operation-data'
 import { createBusinessTableScrollX, displayBusinessTableValue, enhanceBusinessTableColumns, getBusinessTableValue } from '~@/utils/business-table'
+import { createFinancialComparison } from '~@/utils/financial-comparison'
+import { getCurrentFinancialMonthRange } from '~@/utils/financialPeriod'
 import { getLoanApprovalAmount, parseVehicleLoanWorkbook } from './import-utils'
 
 type LoanStatus = '未开始' | '还款中' | '临近到期' | '已逾期' | '已结清'
@@ -106,12 +111,14 @@ interface PaymentForm {
 }
 
 const message = useMessage()
+const businessDictionaries = useBusinessDictionaries()
 const fileInputRef = ref<HTMLInputElement>()
 const modalOpen = ref(false)
 const detailOpen = ref(false)
 const planOpen = ref(false)
 const paymentOpen = ref(false)
 const submitting = ref(false)
+const paymentSubmitting = ref(false)
 const isUpdate = ref(false)
 const formRef = ref<FormInstance>()
 const paymentFormRef = ref<FormInstance>()
@@ -121,13 +128,26 @@ const detailRecord = ref<VehicleLoanRecord>()
 const planRecord = ref<VehicleLoanRecord>()
 const paymentRecord = ref<VehicleLoanRecord>()
 const queryModel = reactive<QueryModel>({})
-
-const lenderOptions = ['青海银行', '建设银行', '工商银行', '平安租赁', '东风金融', '解放金融']
-  .map(value => ({ label: value, value }))
-const statusOptions: LoanStatus[] = ['未开始', '还款中', '临近到期', '已逾期', '已结清']
-const paymentMethods: PaymentMethod[] = ['银行转账', '现金', '承兑', '其他']
+const listPagination = reactive({
+  current: 1,
+  pageSize: 10,
+  pageSizeOptions: ['10', '20', '50', '100'],
+  showSizeChanger: true,
+  showTotal: (total: number) => `共 ${total} 条`,
+})
 
 const records = transportVehicleLoanRows
+const lenderOptions = computed(() => businessDictionaries.options('loan_lender'))
+const statusOptions: LoanStatus[] = ['未开始', '还款中', '临近到期', '已逾期', '已结清']
+const paymentMethods = computed(() => businessDictionaries.values('loan_payment_method') as PaymentMethod[])
+const vehicleOptions = computed(() => {
+  const vehicles = [
+    ...transportBaseVehicleRows.value.map(row => ({ plateNo: String(row.plateNo || row.code || '').trim(), trailerNo: String(row.trailerNo || '').trim() })),
+    ...records.value.map(row => ({ plateNo: row.plateNo, trailerNo: row.trailerNo || '' })),
+  ]
+  return [...new Map(vehicles.filter(item => item.plateNo).map(item => [item.plateNo, item])).values()]
+    .map(item => ({ label: item.trailerNo ? `${item.plateNo} / ${item.trailerNo}` : item.plateNo, value: item.plateNo, trailerNo: item.trailerNo }))
+})
 
 const columns = shallowRef([
   { title: '合同编号', dataIndex: 'contractNo', width: 130, fixed: 'left' as const },
@@ -200,25 +220,33 @@ const filteredRecords = computed(() => {
   })
 })
 
+function summarizeLoanPeriod(source: VehicleLoanRecord[], startDate: string, endDate: string) {
+  const rows = source.flatMap(record => buildRepaymentPlan(record)
+    .filter(row => row.dueDate >= startDate && row.dueDate < endDate)
+    .map(row => ({ ...row, loanId: record.id })))
+  return {
+    contractCount: new Set(rows.map(row => row.loanId)).size,
+    dueAmount: rows.reduce((sum, row) => sum + row.scheduledAmount, 0),
+    paidAmount: rows.reduce((sum, row) => sum + row.paidAmount, 0),
+    overdueCount: rows.filter(row => row.status === '已逾期').length,
+  }
+}
+
 const summaryCards = computed(() => {
   const source = filteredRecords.value
-  const summary = source.reduce((acc, record) => {
-    const computed = getLoanComputed(record)
-    acc.totalLoan += record.loanAmount
-    acc.remainingPrincipal += computed.remainingPrincipal
-    acc.monthlyPayment += computed.status === '已结清' ? 0 : record.monthlyPayment
-    if (computed.status === '已逾期')
-      acc.overdueCount += 1
-    if (computed.status === '已结清')
-      acc.settledCount += 1
-    return acc
-  }, { totalLoan: 0, remainingPrincipal: 0, monthlyPayment: 0, overdueCount: 0, settledCount: 0 })
+  const currentPeriod = getCurrentFinancialMonthRange()
+  const current = summarizeLoanPeriod(source, currentPeriod.startDate, currentPeriod.endDate)
+  const previous = summarizeLoanPeriod(
+    source,
+    currentPeriod.startAt.subtract(1, 'month').format('YYYY-MM-DD'),
+    currentPeriod.endAt.subtract(1, 'month').format('YYYY-MM-DD'),
+  )
 
   return [
-    { label: '贷款合同数', value: source.length, hint: `${summary.settledCount} 笔已结清`, tone: 'primary' as const },
-    { label: '贷款总额', value: formatAmount(summary.totalLoan), hint: '当前筛选范围', tone: 'default' as const },
-    { label: '剩余本金', value: formatAmount(summary.remainingPrincipal), hint: `月供合计 ${formatAmount(summary.monthlyPayment)}`, tone: 'warning' as const },
-    { label: '逾期合同', value: summary.overdueCount, hint: summary.overdueCount ? '需跟进还款' : '无逾期', tag: summary.overdueCount ? '预警' : '正常', tone: summary.overdueCount ? 'danger' as const : 'success' as const },
+    { label: '本月应还合同', value: current.contractCount, comparison: createFinancialComparison(current.contractCount, previous.contractCount, `${previous.contractCount} 笔`), tone: 'primary' as const },
+    { label: '本月应还金额', value: formatAmount(current.dueAmount), comparison: createFinancialComparison(current.dueAmount, previous.dueAmount, formatAmount(previous.dueAmount)), tone: 'default' as const },
+    { label: '本月已还金额', value: formatAmount(current.paidAmount), comparison: createFinancialComparison(current.paidAmount, previous.paidAmount, formatAmount(previous.paidAmount)), tone: 'success' as const },
+    { label: '本月逾期期数', value: current.overdueCount, comparison: createFinancialComparison(current.overdueCount, previous.overdueCount, `${previous.overdueCount} 期`), tag: current.overdueCount ? '预警' : '正常', tone: current.overdueCount ? 'danger' as const : 'success' as const },
   ]
 })
 
@@ -242,7 +270,8 @@ watch(() => paymentForm.value.periodNo, (periodNo) => {
   paymentForm.value.interest = round2(Math.max(row.scheduledInterest - row.paidInterest, 0))
 })
 
-onMounted(() => {
+onMounted(async () => {
+  await businessDictionaries.load()
   loadLoanApprovalStatus()
 })
 
@@ -408,13 +437,19 @@ function getPlanAmountCell(record: Record<string, any>, dataIndex: unknown) {
 }
 
 function handleSearch() {
-  message.success('查询成功')
+  listPagination.current = 1
 }
 
 function handleReset() {
   Object.keys(queryModel).forEach((key) => {
     delete queryModel[key as keyof QueryModel]
   })
+  listPagination.current = 1
+}
+
+function handleListTableChange(pagination: { current?: number, pageSize?: number }) {
+  listPagination.current = Number(pagination.current || 1)
+  listPagination.pageSize = Number(pagination.pageSize || listPagination.pageSize)
 }
 
 function handleAdd() {
@@ -438,10 +473,32 @@ function handleEdit(record: VehicleLoanRecord) {
   modalOpen.value = true
 }
 
+function handleVehicleChange(value: unknown) {
+  const plateNo = String(value || '')
+  const vehicle = vehicleOptions.value.find(item => item.value === plateNo)
+  if (vehicle)
+    formData.value.trailerNo = vehicle.trailerNo
+}
+
+function editDetailRecord() {
+  if (!detailRecord.value)
+    return
+  const record = detailRecord.value
+  detailOpen.value = false
+  handleEdit(record)
+}
+
 async function handleSubmit() {
-  const snapshot = structuredClone(records.value)
+  const snapshot = cloneDeep(records.value)
   try {
     await formRef.value?.validate()
+    const duplicate = records.value.some(item => item.contractNo.trim() === formData.value.contractNo.trim() && item.id !== formData.value.id)
+    if (duplicate)
+      return message.warning('合同编号已存在，请检查后再保存')
+    if (Number(formData.value.loanAmount || 0) <= 0 || Number(formData.value.principalAmount || 0) <= 0 || Number(formData.value.monthlyPayment || 0) <= 0)
+      return message.warning('贷款金额、本金和月供必须大于 0')
+    if (formData.value.startDate && formData.value.firstDueDate?.isBefore(formData.value.startDate, 'day'))
+      return message.warning('首期还款日不能早于放款日期')
     submitting.value = true
     const payload: VehicleLoanRecord = {
       id: formData.value.id || Math.max(...records.value.map(item => item.id), 0) + 1,
@@ -486,7 +543,7 @@ async function handleSubmit() {
 }
 
 async function handleDelete(record: VehicleLoanRecord) {
-  const snapshot = structuredClone(records.value)
+  const snapshot = cloneDeep(records.value)
   try {
     records.value = records.value.filter(item => item.id !== record.id)
     await nextTick()
@@ -559,12 +616,22 @@ function handlePayment(record: VehicleLoanRecord) {
 }
 
 async function handlePaymentSubmit() {
-  const snapshot = structuredClone(records.value)
+  const snapshot = cloneDeep(records.value)
   try {
     await paymentFormRef.value?.validate()
     const target = records.value.find(item => item.id === paymentForm.value.loanId)
     if (!target)
       return
+    const amount = Number(paymentForm.value.amount || 0)
+    const principal = Number(paymentForm.value.principal || 0)
+    const interest = Number(paymentForm.value.interest || 0)
+    if (amount <= 0 || principal <= 0)
+      return message.warning('还款金额和偿还本金必须大于 0')
+    if (Math.abs(amount - principal - interest) > 0.01)
+      return message.warning('还款金额应等于偿还本金与利息之和')
+    if (principal > getLoanComputed(target).remainingPrincipal + 0.01)
+      return message.warning('偿还本金不能大于剩余本金')
+    paymentSubmitting.value = true
     target.payments.push({
       id: Math.max(...target.payments.map(item => item.id), 0) + 1,
       periodNo: Number(paymentForm.value.periodNo),
@@ -584,6 +651,9 @@ async function handlePaymentSubmit() {
   catch (error: any) {
     records.value = snapshot
     message.error(error?.message || '还款记录保存失败，已恢复修改前数据')
+  }
+  finally {
+    paymentSubmitting.value = false
   }
 }
 
@@ -662,7 +732,7 @@ function handleImport(event: Event) {
     return
   const reader = new FileReader()
   reader.onload = async () => {
-    const snapshot = structuredClone(records.value)
+    const snapshot = cloneDeep(records.value)
     try {
       const workbook = XLSX.read(reader.result, { type: 'array', cellStyles: true })
       const nextId = Math.max(...records.value.map(item => item.id), 0) + 1
@@ -776,10 +846,10 @@ function statusColor(status: LoanStatus | '已还款') {
 
     <a-alert v-if="transportOperationError" class="loan-card" type="error" show-icon :message="transportOperationError" />
 
-    <SummaryCards :cards="summaryCards" :loading="transportOperationLoading" />
+    <SummaryCards :cards="summaryCards" :loading="transportOperationLoading" compact />
 
-    <a-card class="loan-card">
-      <a-form :model="queryModel" class="loan-query" layout="inline">
+    <a-card class="loan-card" :bordered="false">
+      <a-form :model="queryModel" class="loan-query" layout="inline" @finish="handleSearch">
         <a-form-item label="关键字">
           <a-input v-model:value="queryModel.keyword" allow-clear placeholder="合同/车号/备注" />
         </a-form-item>
@@ -801,7 +871,7 @@ function statusColor(status: LoanStatus | '已还款') {
         </a-form-item>
         <a-form-item class="query-actions">
           <a-space>
-            <a-button type="primary" @click="handleSearch">
+            <a-button type="primary" html-type="submit">
               <template #icon>
                 <SearchOutlined />
               </template>
@@ -815,14 +885,15 @@ function statusColor(status: LoanStatus | '已还款') {
       </a-form>
     </a-card>
 
-    <a-card class="loan-card" title="车贷费用列表">
+    <a-card class="loan-card" title="车贷费用列表" :bordered="false">
       <a-table
         row-key="id"
         :loading="transportOperationLoading"
         :columns="tableColumns"
         :data-source="filteredRecords"
-        :pagination="{ defaultPageSize: 10, pageSizeOptions: ['10', '20', '50', '100'], showSizeChanger: true, showTotal: (total: number) => `共 ${total} 条` }"
+        :pagination="listPagination"
         :scroll="{ x: tableScrollX }"
+        @change="handleListTableChange"
       >
         <template #bodyCell="{ column, record }">
           <template v-if="column.dataIndex === 'vehicleInfo'">
@@ -908,6 +979,9 @@ function statusColor(status: LoanStatus | '已还款') {
       v-model:open="modalOpen"
       :title="isUpdate ? '编辑车贷' : '新增车贷'"
       :confirm-loading="submitting"
+      :closable="!submitting"
+      :keyboard="!submitting"
+      :cancel-button-props="{ disabled: submitting }"
       width="860px"
       :mask-closable="false"
       ok-text="保存"
@@ -923,7 +997,7 @@ function statusColor(status: LoanStatus | '已还款') {
           </a-col>
           <a-col :xs="24" :md="8">
             <a-form-item name="plateNo" label="车牌号">
-              <a-input v-model:value="formData.plateNo" placeholder="请输入车牌号" />
+              <a-select v-model:value="formData.plateNo" show-search option-filter-prop="label" :options="vehicleOptions" placeholder="请选择车牌号" @change="handleVehicleChange" />
             </a-form-item>
           </a-col>
           <a-col :xs="24" :md="8">
@@ -938,27 +1012,27 @@ function statusColor(status: LoanStatus | '已还款') {
           </a-col>
           <a-col :xs="24" :md="8">
             <a-form-item name="loanAmount" label="贷款金额">
-              <a-input-number v-model:value="formData.loanAmount" class="w-full" :min="0" :precision="2" />
+              <business-input-number v-model:value="formData.loanAmount" class="w-full" :min="0" :precision="2" />
             </a-form-item>
           </a-col>
           <a-col :xs="24" :md="8">
             <a-form-item name="principalAmount" label="本金金额">
-              <a-input-number v-model:value="formData.principalAmount" class="w-full" :min="0" :precision="2" />
+              <business-input-number v-model:value="formData.principalAmount" class="w-full" :min="0" :precision="2" />
             </a-form-item>
           </a-col>
           <a-col :xs="24" :md="8">
             <a-form-item label="年利率(%)">
-              <a-input-number v-model:value="formData.annualRate" class="w-full" :min="0" :precision="2" />
+              <business-input-number v-model:value="formData.annualRate" class="w-full" :min="0" :precision="2" />
             </a-form-item>
           </a-col>
           <a-col :xs="24" :md="8">
             <a-form-item name="totalPeriods" label="总期数">
-              <a-input-number v-model:value="formData.totalPeriods" class="w-full" :min="1" :precision="0" />
+              <business-input-number v-model:value="formData.totalPeriods" class="w-full" :min="1" :precision="0" />
             </a-form-item>
           </a-col>
           <a-col :xs="24" :md="8">
             <a-form-item name="monthlyPayment" label="月供金额">
-              <a-input-number v-model:value="formData.monthlyPayment" class="w-full" :min="0" :precision="2" />
+              <business-input-number v-model:value="formData.monthlyPayment" class="w-full" :min="0" :precision="2" />
             </a-form-item>
           </a-col>
           <a-col :xs="24" :md="8">
@@ -985,7 +1059,7 @@ function statusColor(status: LoanStatus | '已还款') {
       </a-form>
     </a-modal>
 
-    <a-modal v-model:open="paymentOpen" title="还款登记" width="720px" :mask-closable="false" ok-text="保存" cancel-text="取消" @ok="handlePaymentSubmit">
+    <a-modal v-model:open="paymentOpen" title="还款登记" width="720px" :mask-closable="false" :closable="!paymentSubmitting" :keyboard="!paymentSubmitting" :confirm-loading="paymentSubmitting" :cancel-button-props="{ disabled: paymentSubmitting }" ok-text="保存" cancel-text="取消" @ok="handlePaymentSubmit">
       <a-form ref="paymentFormRef" :model="paymentForm" :rules="paymentRules" layout="vertical">
         <a-row :gutter="16">
           <a-col :xs="24" :md="12">
@@ -1000,17 +1074,17 @@ function statusColor(status: LoanStatus | '已还款') {
           </a-col>
           <a-col :xs="24" :md="8">
             <a-form-item name="amount" label="还款金额">
-              <a-input-number v-model:value="paymentForm.amount" class="w-full" :min="0" :precision="2" />
+              <business-input-number v-model:value="paymentForm.amount" class="w-full" :min="0" :precision="2" />
             </a-form-item>
           </a-col>
           <a-col :xs="24" :md="8">
             <a-form-item name="principal" label="偿还本金">
-              <a-input-number v-model:value="paymentForm.principal" class="w-full" :min="0" :precision="2" />
+              <business-input-number v-model:value="paymentForm.principal" class="w-full" :min="0" :precision="2" />
             </a-form-item>
           </a-col>
           <a-col :xs="24" :md="8">
             <a-form-item label="偿还利息">
-              <a-input-number v-model:value="paymentForm.interest" class="w-full" :min="0" :precision="2" />
+              <business-input-number v-model:value="paymentForm.interest" class="w-full" :min="0" :precision="2" />
             </a-form-item>
           </a-col>
           <a-col :xs="24" :md="12">
@@ -1068,8 +1142,15 @@ function statusColor(status: LoanStatus | '已还款') {
       </a-table>
     </a-modal>
 
-    <a-modal v-model:open="detailOpen" title="车贷详情" :footer="null" width="820px">
-      <a-descriptions v-if="detailRecord" bordered :column="2" size="small">
+    <BusinessDetailDrawer
+      v-model:open="detailOpen"
+      :title="detailRecord?.contractNo || '车贷详情'"
+      :subtitle="detailRecord ? `${detailRecord.plateNo} · ${detailRecord.lender}` : ''"
+      :status="detailRecord ? getLoanComputed(detailRecord).status : ''"
+      :status-color="detailRecord ? statusColor(getLoanComputed(detailRecord).status) : 'default'"
+      :width="820"
+    >
+      <a-descriptions v-if="detailRecord" title="贷款信息" bordered :column="2" size="small">
         <a-descriptions-item label="合同编号">
           {{ detailRecord.contractNo }}
         </a-descriptions-item>
@@ -1115,7 +1196,18 @@ function statusColor(status: LoanStatus | '已还款') {
           {{ detailRecord.remark || '-' }}
         </a-descriptions-item>
       </a-descriptions>
-    </a-modal>
+      <template v-if="detailRecord" #footer>
+        <a-button @click="detailOpen = false">
+          关闭
+        </a-button>
+        <a-button @click="editDetailRecord">
+          编辑合同
+        </a-button>
+        <a-button v-if="getLoanComputed(detailRecord).status !== '已结清'" type="primary" @click="detailOpen = false; handlePayment(detailRecord)">
+          登记还款
+        </a-button>
+      </template>
+    </BusinessDetailDrawer>
   </page-container>
 </template>
 

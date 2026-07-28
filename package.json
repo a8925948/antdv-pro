@@ -18,6 +18,7 @@
     "migrate:mysql": "node scripts/apply-mysql-migrations.mjs",
     "verify:mysql": "node scripts/verify-mysql-migrations.mjs",
     "verify:integrity": "node scripts/verify-cross-module-integrity.mjs",
+    "verify:integrity:production": "sh deploy/scripts/verify-cross-module-integrity.sh",
     "probe:approval": "node scripts/probe-production-approval.mjs",
     "import:system:mysql": "node scripts/import-system-json-to-mysql.mjs",
     "import:business:mysql": "node scripts/import-business-json-to-mysql.mjs",

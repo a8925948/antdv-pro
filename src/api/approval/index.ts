@@ -172,7 +172,20 @@ export function saveOaModulePartitionApi(data: { partition: string, rows: Array<
   return usePut<OaModuleState>('/approval/oa-module/data', data)
 }
 
+export function getSalaryTemplatesApi() {
+  return useGet<any[]>('/approval/salary-templates')
+}
+
+export function saveSalaryTemplateApi(data: Record<string, any>) {
+  return usePost<any, Record<string, any>>('/approval/salary-templates/save', data)
+}
+
+export function generateSalaryPeriodApi(data: { financialYear: number, financialMonth: number }) {
+  return usePost<OaModuleState, typeof data>('/approval/salary/generate', data)
+}
+
 export interface RegisterReceiptParams {
+  cashBalanceId?: string
   accountName: string
   amount: number
   receiptDate: string
@@ -194,8 +207,13 @@ export function registerReceiptApi(data: RegisterReceiptParams) {
   return usePost('/approval/finance/receipts', data)
 }
 
-export function allocateReceiptApi(id: string, allocations: ReceiptAllocationParams[]) {
-  return usePost(`/approval/finance/receipts/${id}/allocate`, { allocations })
+export function allocateReceiptApi(id: string, data: {
+  allocations: ReceiptAllocationParams[]
+  cashBalanceId: string
+  allocationBatchId: string
+  handler?: string
+}) {
+  return usePost(`/approval/finance/receipts/${id}/allocate`, data)
 }
 
 export interface PaymentAllocationParams {
@@ -206,6 +224,9 @@ export interface PaymentAllocationParams {
 
 export interface CreatePaymentParams {
   paymentRequestNo: string
+  cashBalanceId: string
+  companyName: string
+  accountNo: string
   accountName: string
   paymentDate: string
   payeeName: string
@@ -263,7 +284,7 @@ export function saveWecomApprovalConfigApi(data: Record<string, any>) {
 }
 
 export function testWecomApprovalConnectionApi() {
-  return usePost('/approval/wecom/test')
+  return usePost<boolean>('/approval/wecom/test', undefined, { errorNotification: false })
 }
 
 export function saveWecomApprovalMappingApi(data: Record<string, any>) {

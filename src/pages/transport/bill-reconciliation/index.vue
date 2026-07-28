@@ -9,6 +9,8 @@ import SummaryCards from '~@/components/summary-cards/index.vue'
 import { transportOrderRows } from '~@/composables/transport-operation-data'
 import { BILL_RECONCILIATION_CHECKS, isSameBillValue } from '~@/utils/bill-reconciliation'
 import { createBusinessTableScrollX, displayBusinessTableValue, enhanceBusinessTableColumns, getBusinessTableValue } from '~@/utils/business-table'
+import { createFinancialComparison } from '~@/utils/financial-comparison'
+import { getCurrentFinancialMonthRange } from '~@/utils/financialPeriod'
 
 type ReconciliationStatus = '未处理' | '已确认系统正确' | '已确认客户正确' | '已修改' | '忽略'
 type ArchiveStatus = '待确认' | '已归档'
@@ -72,7 +74,8 @@ const fieldOptions: MappingOption[] = [
 const statusOptions: ReconciliationStatus[] = ['未处理', '已确认系统正确', '已确认客户正确', '已修改', '忽略']
 const archiveStatusOptions: ArchiveStatus[] = ['待确认', '已归档']
 
-const dateRange = ref<[string, string]>(['', ''])
+const currentFinancialPeriod = getCurrentFinancialMonthRange()
+const dateRange = ref<[string, string]>([currentFinancialPeriod.displayStartDate, currentFinancialPeriod.displayEndDate])
 const selectedCustomers = ref<string[]>([])
 const systemRows = ref<BillRow[]>([])
 const rawCustomerRows = ref<Array<Record<string, unknown>>>([])
@@ -114,10 +117,26 @@ const filteredCustomerRows = computed(() => {
 const unresolvedCount = computed(() => differences.value.filter(row => row.status === '未处理').length)
 const canArchive = computed(() => hasCompared.value && unresolvedCount.value === 0 && filteredSystemRows.value.length > 0 && filteredCustomerRows.value.length > 0)
 
+const currentMonthSystemRows = computed(() => transportOrderRows.value
+  .filter(row => isDateInRange(row.shipDate, currentFinancialPeriod.startAt, currentFinancialPeriod.displayEndAt))
+  .map(mapOrderToBillRow))
+const previousFinancialStart = currentFinancialPeriod.startAt.subtract(1, 'month')
+const previousFinancialEnd = currentFinancialPeriod.displayEndAt.subtract(1, 'month')
+const previousMonthSystemRows = computed(() => transportOrderRows.value
+  .filter(row => isDateInRange(row.shipDate, previousFinancialStart, previousFinancialEnd))
+  .map(mapOrderToBillRow))
+const previousMonthArchives = computed(() => archiveRows.value.filter((row) => {
+  const [start, end] = row.period.split(' 至 ')
+  return start === previousFinancialStart.format('YYYY-MM-DD') && end === previousFinancialEnd.format('YYYY-MM-DD')
+}))
+const previousCustomerCount = computed(() => previousMonthArchives.value.reduce((sum, row) => sum + row.customerRows.length, 0))
+const previousDifferenceCount = computed(() => previousMonthArchives.value.reduce((sum, row) => sum + row.differences.length, 0))
+
 const simpleMetrics = computed(() => [
-  { label: '系统运单', value: filteredSystemRows.value.length, hint: formatAmount(sumRows(filteredSystemRows.value, 'freightAmount')), tone: 'primary' as const },
-  { label: '客户账单', value: filteredCustomerRows.value.length, hint: importedColumns.value.length ? '已导入' : '待导入', tone: filteredCustomerRows.value.length ? 'success' as const : 'default' as const },
-  { label: '核对差异', value: differences.value.length, hint: unresolvedCount.value ? `${unresolvedCount.value} 条待确认` : (hasCompared.value ? '已确认' : '待核对'), tone: unresolvedCount.value ? 'warning' as const : 'default' as const },
+  { label: '系统运单', value: currentMonthSystemRows.value.length, comparison: createFinancialComparison(currentMonthSystemRows.value.length, previousMonthSystemRows.value.length, `${previousMonthSystemRows.value.length} 单`), tone: 'primary' as const },
+  { label: '系统运费', value: formatAmount(sumRows(currentMonthSystemRows.value, 'freightAmount')), comparison: createFinancialComparison(sumRows(currentMonthSystemRows.value, 'freightAmount'), sumRows(previousMonthSystemRows.value, 'freightAmount'), formatAmount(sumRows(previousMonthSystemRows.value, 'freightAmount'))), tone: 'success' as const },
+  { label: '客户账单', value: filteredCustomerRows.value.length, comparison: createFinancialComparison(filteredCustomerRows.value.length, previousCustomerCount.value, `${previousCustomerCount.value} 单`), tone: filteredCustomerRows.value.length ? 'success' as const : 'default' as const },
+  { label: '核对差异', value: differences.value.length, comparison: createFinancialComparison(differences.value.length, previousDifferenceCount.value, `${previousDifferenceCount.value} 条`), tag: unresolvedCount.value ? `${unresolvedCount.value} 条待确认` : undefined, tone: unresolvedCount.value ? 'warning' as const : 'default' as const },
 ])
 
 const reconciliationStep = computed(() => {
@@ -521,11 +540,11 @@ onMounted(() => {
 
 <template>
   <page-container>
-    <SummaryCards :cards="simpleMetrics" :xl-span="8" compact />
+    <SummaryCards :cards="simpleMetrics" compact />
 
     <a-tabs v-model:active-key="activeTab" class="bill-tabs">
       <a-tab-pane key="current" tab="本次核对">
-        <a-card class="bill-card primary-workspace" title="核对设置">
+        <a-card class="bill-card primary-workspace" title="核对设置" :bordered="false">
           <template #extra>
             <a-tag :color="reconciliationState.color">
               {{ reconciliationState.text }}
@@ -538,21 +557,14 @@ onMounted(() => {
               </div>
               <a-form layout="vertical">
                 <a-form-item label="核对时间段">
-                  <div class="date-range-inputs">
-                    <a-input
-                      :value="dateRange[0]"
-                      allow-clear
-                      placeholder="开始日期 YYYY-MM-DD"
-                      @update:value="dateRange[0] = $event"
-                    />
-                    <span class="date-range-separator">至</span>
-                    <a-input
-                      :value="dateRange[1]"
-                      allow-clear
-                      placeholder="截止日期 YYYY-MM-DD"
-                      @update:value="dateRange[1] = $event"
-                    />
-                  </div>
+                  <a-range-picker
+                    v-model:value="dateRange"
+                    class="full-control"
+                    value-format="YYYY-MM-DD"
+                    format="YYYY-MM-DD"
+                    :placeholder="['开始日期', '截止日期']"
+                    :allow-clear="false"
+                  />
                 </a-form-item>
                 <a-form-item label="客户">
                   <div class="customer-select-row">
@@ -611,7 +623,7 @@ onMounted(() => {
           <a-steps class="reconciliation-steps" size="small" :current="reconciliationStep" :items="reconciliationSteps" />
         </a-card>
 
-        <a-card class="bill-card" title="差异具体内容">
+        <a-card class="bill-card" title="差异具体内容" :bordered="false">
           <template #extra>
             <a-space>
               <a-button :icon="h(DownloadOutlined)" :disabled="!differences.length" @click="exportDifferences">
@@ -672,7 +684,7 @@ onMounted(() => {
           </a-table>
         </a-card>
 
-        <a-card class="bill-card archive-card" title="保存归档">
+        <a-card class="bill-card archive-card" title="保存归档" :bordered="false">
           <template #extra>
             <a-button type="primary" :icon="h(SaveOutlined)" :disabled="!canArchive" @click="saveArchive">
               保存归档
@@ -691,7 +703,7 @@ onMounted(() => {
           </a-descriptions>
         </a-card>
 
-        <a-card class="bill-card">
+        <a-card class="bill-card" :bordered="false">
           <template #title>
             <span>高级信息</span>
           </template>
@@ -776,7 +788,7 @@ onMounted(() => {
       </a-tab-pane>
 
       <a-tab-pane key="history" tab="历史查询">
-        <a-card class="bill-card" title="历史核对记录">
+        <a-card class="bill-card" title="历史核对记录" :bordered="false">
           <a-form class="history-query" layout="vertical" :model="historyQuery">
             <a-row :gutter="[16, 8]">
               <a-col :xs="24" :md="8" :xl="5">
@@ -859,17 +871,6 @@ onMounted(() => {
 
 .full-control {
   width: 100%;
-}
-
-.date-range-inputs {
-  display: grid;
-  align-items: center;
-  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
-  gap: 10px;
-}
-
-.date-range-separator {
-  color: var(--admin-text-secondary);
 }
 
 .customer-select-row {

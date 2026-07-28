@@ -1,12 +1,10 @@
 <script setup lang="ts">
 import type { ApprovalTask } from '~@/api/approval'
-import type { OfficeVehicleReminder } from '~@/api/office-vehicle'
-import type { RegulatoryFeeModel } from '~@/api/transport/fees'
-import { AimOutlined, AuditOutlined, CarOutlined, CloudOutlined, EnvironmentOutlined, ReloadOutlined, ShopOutlined, SwapOutlined, ThunderboltOutlined } from '@ant-design/icons-vue'
+import type { ExpiryWarningItem } from '~@/api/dashboard/expiry-warnings'
+import { AimOutlined, AuditOutlined, CarOutlined, CloudOutlined, DollarOutlined, EnvironmentOutlined, PlusOutlined, ReloadOutlined, ShopOutlined, SwapOutlined, ThunderboltOutlined, ToolOutlined } from '@ant-design/icons-vue'
 import dayjs from 'dayjs'
 import { getApprovalTodoApi } from '~@/api/approval'
-import { getOfficeVehicleReminderListApi } from '~@/api/office-vehicle'
-import { getRegulatoryFeeListApi } from '~@/api/transport/fees'
+import { getExpiryWarningsApi } from '~@/api/dashboard/expiry-warnings'
 import { createFinancialMonthOptions, createFinancialYearOptions } from '~@/composables/financial-period-filter'
 import {
   loadTransportOperationData,
@@ -52,10 +50,9 @@ const approvalTasks = ref<ApprovalTask[]>([])
 const tradeOrders = ref<TradeOrderRecord[]>([])
 const hotelRevenue = ref<HotelRevenueRecord[]>([])
 const hotelDaily = ref<HotelDailyRecord[]>([])
-const officeVehicleReminders = ref<OfficeVehicleReminder[]>([])
-const regulatoryFees = ref<RegulatoryFeeModel[]>([])
+const expiryWarnings = ref<ExpiryWarningItem[]>([])
 const expiryDetailOpen = ref(false)
-const selectedExpiryTitle = ref('')
+const selectedExpiryCategory = ref<ExpiryWarningItem['category']>()
 const currentFinancialMonth = getCurrentFinancialMonthRange()
 const selectedFinancialYear = ref(Number(currentFinancialMonth.key.slice(0, 4)))
 const selectedFinancialMonth = ref(Number(currentFinancialMonth.key.slice(4, 6)))
@@ -346,67 +343,9 @@ const hotelExpense = computed(() => businessOverview.value.hotel.expense)
 const occupancyRate = computed(() => businessOverview.value.hotel.occupancyRate)
 const latestHotelDaily = computed(() => businessOverview.value.hotel.hasDaily ? { date: businessOverview.value.hotel.latestDailyDate } : undefined)
 
-function latestByBusinessKey<T>(rows: T[], keyOf: (row: T) => string, updatedAtOf: (row: T) => string | number | undefined) {
-  const latest = new Map<string, T>()
-  rows.forEach((row) => {
-    const key = keyOf(row)
-    const current = latest.get(key)
-    if (!current || String(updatedAtOf(row) || '') > String(updatedAtOf(current) || ''))
-      latest.set(key, row)
-  })
-  return [...latest.values()]
-}
-
-const expiryWarnings = computed(() => {
-  const today = dayjs().startOf('day')
-  const vehicleWarnings = latestByBusinessKey(
-    officeVehicleReminders.value.filter(item => !item.handled),
-    item => `${item.plateNo || '办公车辆'}\u0001${item.reminderType}`,
-    item => item.dueDate,
-  )
-    .filter((item) => {
-      const days = dayjs(item.dueDate).startOf('day').diff(today, 'day')
-      return days >= 0 && days <= 30
-    })
-    .map(item => ({
-      key: `vehicle-${item.id}`,
-      recordId: item.id,
-      title: item.reminderType,
-      feeType: undefined,
-      target: item.plateNo || '办公车辆',
-      dueDate: item.dueDate,
-      days: dayjs(item.dueDate).startOf('day').diff(today, 'day'),
-      route: '/oa-approval/vehicle',
-      source: '办公车辆',
-    }))
-  const feeWarnings = latestByBusinessKey(
-    regulatoryFees.value.filter(item => item.manualStatus !== 'disabled'),
-    item => `${item.plateNo || item.trailerNo || item.area || '运输规费'}\u0001${item.feeName || item.feeType}`,
-    item => item.updatedAt || item.createdAt || item.id,
-  )
-    .filter((item) => {
-      const days = dayjs(item.validEndDate).startOf('day').diff(today, 'day')
-      return days >= 0 && days <= 30
-    })
-    .map(item => ({
-      key: `fee-${item.id}`,
-      recordId: item.id,
-      title: item.feeName || item.feeType,
-      feeType: item.feeType,
-      target: item.plateNo || item.trailerNo || item.area || '运输规费',
-      dueDate: item.validEndDate,
-      days: dayjs(item.validEndDate).startOf('day').diff(today, 'day'),
-      route: '/transport/fees',
-      source: '规费管理',
-    }))
-
-  return [...vehicleWarnings, ...feeWarnings]
-    .sort((a, b) => a.days - b.days)
-})
-
 const expiryWarningGroups = computed(() => {
   const groups = new Map<string, {
-    title: string
+    category: ExpiryWarningItem['category']
     count: number
     nearestDays: number
     nearestDate: string
@@ -415,10 +354,10 @@ const expiryWarningGroups = computed(() => {
   }>()
 
   expiryWarnings.value.forEach((item) => {
-    const current = groups.get(item.title)
+    const current = groups.get(item.category)
     if (!current) {
-      groups.set(item.title, {
-        title: item.title,
+      groups.set(item.category, {
+        category: item.category,
         count: 1,
         nearestDays: item.days,
         nearestDate: item.dueDate,
@@ -438,20 +377,21 @@ const expiryWarningGroups = computed(() => {
   return [...groups.values()].sort((a, b) => a.nearestDays - b.nearestDays)
 })
 
-const selectedExpiryWarnings = computed(() => expiryWarnings.value.filter(item => item.title === selectedExpiryTitle.value))
-const selectedExpiryRoute = computed(() => selectedExpiryWarnings.value[0]?.route || '/transport/fees')
+const selectedExpiryWarnings = computed(() => expiryWarnings.value.filter(item => item.category === selectedExpiryCategory.value))
+const selectedExpiryRoute = computed(() => ({
+  path: selectedExpiryWarnings.value[0]?.route || '/transport/fees',
+  query: selectedExpiryWarnings.value[0]?.query,
+}))
 
-function openExpiryDetail(title: string) {
-  selectedExpiryTitle.value = title
+function openExpiryDetail(category: ExpiryWarningItem['category']) {
+  selectedExpiryCategory.value = category
   expiryDetailOpen.value = true
 }
 
 function expiryRowRoute(record: typeof expiryWarnings.value[number]) {
   return {
     path: record.route,
-    query: record.source === '办公车辆'
-      ? { reminderId: String(record.recordId || ''), plateNo: record.target, reminderType: record.title }
-      : { recordId: String(record.recordId || ''), plateNo: record.target, feeType: record.feeType || record.title, tab: 'records' },
+    query: record.query,
   }
 }
 
@@ -475,6 +415,8 @@ function expiryRowProps(record: typeof expiryWarnings.value[number]) {
 }
 
 function expiryDescription(days: number) {
+  if (days < 0)
+    return `已过期 ${Math.abs(days)} 天`
   if (days === 0)
     return '今天到期'
   return `${days} 天后到期`
@@ -540,10 +482,12 @@ const overviewItems = computed(() => [
 ])
 
 const quickActions = [
-  { title: '审批中心', desc: '处理待办、查看已办与我发起的审批', route: '/oa-approval/center', icon: AuditOutlined },
-  { title: '运输订单', desc: '录入、导入并核对运输订单', route: '/transport/orders', icon: CarOutlined },
-  { title: '贸易订单', desc: '维护采购、销售与结算数据', route: '/trade/orders', icon: SwapOutlined },
-  { title: '酒店流水', desc: '登记营业收入、支出与房态', route: '/hotel/revenue', icon: ShopOutlined },
+  { title: '新增运输订单', desc: '直接录入车辆、路线和运费', route: { path: '/transport/orders', query: { action: 'create' } }, icon: CarOutlined },
+  { title: '新增规费', desc: '登记车辆规费和有效期', route: { path: '/transport/fees', query: { action: 'create' } }, icon: DollarOutlined },
+  { title: '登记维保', desc: '记录车辆里程、项目和供应商', route: { path: '/transport/maintenance', query: { action: 'create' } }, icon: ToolOutlined },
+  { title: '新增贸易订单', desc: '直接录入采购、销售与结算', route: { path: '/trade/orders', query: { action: 'create' } }, icon: SwapOutlined },
+  { title: '新增酒店流水', desc: '快速登记收入、支出与房态', route: { path: '/hotel', query: { action: 'create' } }, icon: ShopOutlined },
+  { title: '审批中心', desc: '处理待办、查看已办与我发起', route: '/oa-approval/center', icon: AuditOutlined },
 ]
 
 const attentionItems = computed(() => [
@@ -561,8 +505,7 @@ async function loadDashboard() {
     useGet<HotelRevenueRecord[]>('/hotel/revenue'),
     useGet<HotelDailyRecord[]>('/hotel/daily'),
     loadTransportOperationData({ force: true }),
-    getOfficeVehicleReminderListApi({ current: 1, pageSize: 1000 }),
-    getRegulatoryFeeListApi({ current: 1, pageSize: 1000 }),
+    getExpiryWarningsApi(),
   ])
 
   if (results[0].status === 'fulfilled' && results[0].value.code === 200)
@@ -580,11 +523,8 @@ async function loadDashboard() {
   if (results[4].status === 'rejected' || transportOperationError.value)
     failures.push('运输')
   if (results[5].status === 'fulfilled' && results[5].value.code === 200)
-    officeVehicleReminders.value = results[5].value.data?.records || []
-  else failures.push('车辆到期提醒')
-  if (results[6].status === 'fulfilled' && results[6].value.code === 200)
-    regulatoryFees.value = results[6].value.data?.records || []
-  else failures.push('规费到期提醒')
+    expiryWarnings.value = results[5].value.data || []
+  else failures.push('到期预警')
 
   loading.value = false
   if (failures.length)
@@ -728,8 +668,9 @@ onMounted(() => {
           <a-card title="常用入口" class="section-card main-quick-card" :bordered="false">
             <div class="quick-list">
               <router-link v-for="item in quickActions" :key="item.title" :to="item.route" class="quick-item">
-                <component :is="item.icon" />
+                <span class="quick-icon"><component :is="item.icon" /></span>
                 <div><strong>{{ item.title }}</strong><small>{{ item.desc }}</small></div>
+                <PlusOutlined v-if="item.title.startsWith('新增')" class="quick-create-icon" />
               </router-link>
             </div>
           </a-card>
@@ -739,19 +680,16 @@ onMounted(() => {
               <span class="expiry-title">到期预警 <a-badge v-if="expiryWarnings.length" :count="expiryWarnings.length" /></span>
             </template>
             <div v-if="expiryWarningGroups.length" class="expiry-group-list">
-              <button v-for="item in expiryWarningGroups.slice(0, 6)" :key="item.title" type="button" class="expiry-group-item" @click="openExpiryDetail(item.title)">
+              <button v-for="item in expiryWarningGroups" :key="item.category" type="button" class="expiry-group-item" @click="openExpiryDetail(item.category)">
                 <div>
-                  <strong>{{ item.title }}</strong>
+                  <strong>{{ item.category }}</strong>
                   <small>{{ item.targets.size }} 个对象 · 最近 {{ item.nearestDate }}</small>
                 </div>
                 <span class="group-count">{{ item.count }} 项</span>
                 <b>{{ expiryDescription(item.nearestDays) }}</b>
               </button>
-              <div v-if="expiryWarningGroups.length > 6" class="expiry-more">
-                另有 {{ expiryWarningGroups.length - 6 }} 类预警，请进入对应模块查看
-              </div>
             </div>
-            <a-empty v-else :image="false" description="未来 30 天暂无到期事项" />
+            <a-empty v-else :image="false" description="暂无已过期或未来 30 天内到期记录" />
           </a-card>
 
           <a-card title="资金概览" class="section-card finance-card" :bordered="false" :loading="loading">
@@ -822,9 +760,9 @@ onMounted(() => {
       </div>
     </section>
 
-    <a-modal v-model:open="expiryDetailOpen" :title="`${selectedExpiryTitle}到期明细`" width="720px" :body-style="{ padding: '0' }">
+    <a-modal v-model:open="expiryDetailOpen" :title="`${selectedExpiryCategory || ''}到期明细`" width="760px" :body-style="{ padding: '0' }">
       <div class="expiry-detail-summary">
-        <span>未来 30 天内到期</span>
+        <span>包含已过期和未来 30 天内到期记录</span>
         <strong>{{ selectedExpiryWarnings.length }} 项</strong>
       </div>
       <a-table
@@ -841,7 +779,7 @@ onMounted(() => {
         <a-table-column title="到期日期" data-index="dueDate" :width="140" />
         <a-table-column title="剩余时间" :width="130">
           <template #default="{ record }">
-            <a-tag :color="record.days <= 7 ? 'orange' : 'blue'">
+            <a-tag :color="record.days < 0 ? 'red' : record.days <= 7 ? 'orange' : 'blue'">
               {{ expiryDescription(record.days) }}
             </a-tag>
           </template>
@@ -1216,7 +1154,21 @@ onMounted(() => {
   font-size: 12px;
 }
 .approval-list :deep(.ant-list-item) {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  column-gap: 16px;
+  align-items: start;
   padding: 12px 0;
+}
+.approval-list :deep(.ant-list-item-meta),
+.approval-list :deep(.ant-list-item-meta-content) {
+  min-width: 0;
+}
+.approval-list :deep(.ant-list-item-meta-title),
+.approval-list :deep(.ant-list-item-meta-description) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .approval-card :deep(.ant-empty) {
   margin-block: 18px 10px;
@@ -1226,21 +1178,14 @@ onMounted(() => {
 }
 .approval-amount {
   display: flex;
-  gap: 12px;
+  flex-direction: column;
+  gap: 8px;
   align-items: center;
-  margin-left: 16px;
+  margin-left: 0;
+  white-space: nowrap;
   strong {
     font-variant-numeric: tabular-nums;
   }
-}
-.side-stack .approval-list :deep(.ant-list-item) {
-  align-items: flex-start;
-  flex-wrap: wrap;
-}
-.side-stack .approval-amount {
-  width: 100%;
-  justify-content: space-between;
-  margin: 8px 0 0;
 }
 .finance-table {
   overflow-x: auto;
@@ -1426,19 +1371,23 @@ onMounted(() => {
   padding: 8px;
 }
 .main-quick-card .quick-list {
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 .quick-item {
   display: grid;
-  grid-template-columns: 34px minmax(0, 1fr);
+  grid-template-columns: 34px minmax(0, 1fr) 18px;
   gap: 10px;
   align-items: center;
   padding: 10px;
   color: var(--admin-text);
   border-radius: 6px;
-  > span {
+  .quick-icon {
     color: var(--admin-primary);
     font-size: 18px;
+  }
+  .quick-create-icon {
+    color: var(--admin-muted);
+    font-size: 14px;
   }
   &:hover,
   &:focus-visible {
@@ -1532,8 +1481,13 @@ onMounted(() => {
     border-left: 0;
   }
   .approval-amount {
-    display: grid;
-    justify-items: end;
+    flex-direction: row;
+    justify-content: space-between;
+    align-items: center;
+    margin-top: 8px;
+  }
+  .approval-list :deep(.ant-list-item) {
+    grid-template-columns: 1fr;
   }
   .section-card :deep(.ant-card-body) {
     padding: 14px;

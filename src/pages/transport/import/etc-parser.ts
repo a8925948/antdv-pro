@@ -25,6 +25,67 @@ export function extractEtcRoutePair(value: unknown) {
   return entry && exit ? `${entry} 至 ${exit}` : ''
 }
 
+export function extractEtcSummaryStations(value: unknown) {
+  const lines = String(value ?? '').split(/\r?\n/).map(line => line.trim()).filter(Boolean)
+  return lines.flatMap((line, index) => {
+    const start = line.match(/([\u4E00-\u9FA5]·[\u4E00-\u9FA5]+)/)?.[1]
+    if (!start)
+      return []
+    const fragments = [start]
+    for (let offset = 1; offset <= 4 && index + offset < lines.length; offset += 1) {
+      const next = lines[index + offset]
+      if (/[\u4E00-\u9FA5]·/.test(next) || /(?:^|\s)20\d{6}(?:\s|$)/.test(next) || /^\d{1,2}\s+(?:至\s+)?[\d,]+\.\d{2}/.test(next))
+        break
+      const fragment = next.match(/^([\u4E00-\u9FA5]{1,12})(?=\s|$)/)?.[1]
+      if (fragment && !/^(?:票|号发|同)$/.test(fragment))
+        fragments.push(fragment)
+    }
+    return [fragments.join('')]
+  })
+}
+
+export function extractEtcSummaryJourneys(value: unknown) {
+  return String(value ?? '').split(/\r?\n/).flatMap((line) => {
+    const row = line.trim().match(/^(\d{1,2})(?:\s+20\d{6})?(?:\s+[\u4E00-\u9FA5·]+)*?\s+(?:至\s+)?(\d+(?:,\d{3})*\.\d{2})(?=\s|$)/)
+    return row ? [{ index: row[1], amount: row[2] }] : []
+  })
+}
+
+export function extractEtcSummaryNo(value: unknown) {
+  const normalized = String(value ?? '').replace(/\s+/g, ' ')
+  const labelIndex = normalized.indexOf('汇总单号')
+  if (labelIndex < 0)
+    return ''
+  const valueText = normalized.slice(labelIndex + '汇总单号'.length).trimStart().replace(/^[:：]/, '').trimStart()
+  return valueText.match(/^([A-Z0-9-]{8,64})/i)?.[1] || ''
+}
+
+export function parseEtcAmountInCents(value: unknown): number | undefined {
+  const normalized = String(value ?? '').trim().replace(/[¥￥,\s]/g, '')
+  const matched = normalized.match(/^(-?)(\d+)(?:\.(\d{1,2}))?$/)
+  if (!matched)
+    return undefined
+  const cents = Number(matched[2]) * 100 + Number((matched[3] || '').padEnd(2, '0'))
+  return matched[1] ? -cents : cents
+}
+
+export function formatEtcAmountFromCents(cents: number) {
+  const sign = cents < 0 ? '-' : ''
+  const absoluteCents = Math.abs(cents)
+  return `¥${sign}${Math.floor(absoluteCents / 100)}.${String(absoluteCents % 100).padStart(2, '0')}`
+}
+
+export function validateEtcAmountTotal(declaredAmount: unknown, journeyAmounts: unknown[]) {
+  const declaredAmountInCents = parseEtcAmountInCents(declaredAmount)
+  const journeyAmountsInCents = journeyAmounts.map(parseEtcAmountInCents)
+  if (declaredAmountInCents === undefined || journeyAmountsInCents.includes(undefined))
+    throw new Error('金额格式异常：ETC金额必须精确到分')
+  const journeyTotalInCents = journeyAmountsInCents.reduce<number>((sum, amount) => sum + (amount ?? 0), 0)
+  if (journeyTotalInCents !== declaredAmountInCents)
+    throw new Error(`金额校验失败：行程合计${formatEtcAmountFromCents(journeyTotalInCents)}，票面金额${formatEtcAmountFromCents(declaredAmountInCents)}`)
+  return journeyTotalInCents
+}
+
 export function formatEtcRoute(entry: unknown, exit: unknown, routeName: unknown) {
   const pair = extractEtcRoutePair(routeName)
   if (pair)
@@ -74,6 +135,7 @@ export function normalizeEtcRecord(row: Record<string, unknown>, index = 0): Etc
   const exitInfo = String(cell(row, ['出口信息', '出口站', '出口收费站', '终点', '出口', 'exitInfo']) || (routeParts.length === 2 ? routeParts[1] : '')).trim()
   return {
     code: createEtcCode(row, index),
+    summaryNo: String(cell(row, ['汇总单号', 'summaryNo']) || '').trim(),
     name: routeName,
     entryInfo,
     exitInfo,

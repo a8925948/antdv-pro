@@ -9,7 +9,6 @@ interface EnhanceBusinessTableOptions {
   numberFields?: string[]
   dateFields?: string[]
   noSortFields?: string[]
-  noEllipsisFields?: string[]
   widthOverrides?: Record<string, number>
 }
 
@@ -89,7 +88,9 @@ export function enhanceBusinessTableColumns(columns: TableColumn[], options: Enh
     const existingCustomCell = column.customCell
 
     enhanced.width = column.width ?? options.widthOverrides?.[key] ?? inferBusinessColumnWidth(column, key, options)
-    enhanced.ellipsis = column.ellipsis ?? !isBusinessTableField(key, [...defaultActionFields, ...(options.actionFields ?? []), ...defaultStatusFields, ...(options.statusFields ?? []), ...(options.noEllipsisFields ?? [])])
+    // Business records must remain fully readable. Widths provide scanning rhythm;
+    // wrapping and horizontal scrolling handle constrained containers.
+    enhanced.ellipsis = false
     enhanced.customCell = (...args: any[]) => {
       const previous = typeof existingCustomCell === 'function' ? existingCustomCell(...args) : {}
       return {
@@ -186,6 +187,8 @@ export function compareBusinessTableValue(a: unknown, b: unknown) {
 export function businessTableCellClass(key: string, options: EnhanceBusinessTableOptions = {}) {
   if (isBusinessTableField(key, [...defaultActionFields, ...(options.actionFields ?? [])]))
     return 'table-cell-action'
+  if (isBusinessTableField(key, [...defaultStatusFields, ...(options.statusFields ?? [])]))
+    return 'table-cell-status'
   if (isBusinessTableMoneyField(key, options))
     return 'table-cell-money'
   if (isBusinessTableNumberField(key, options))

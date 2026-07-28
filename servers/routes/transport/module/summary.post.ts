@@ -23,13 +23,16 @@ function normalizeMonthKey(value?: string) {
 }
 
 function getRowBusinessDate(row: Record<string, any>) {
-  const dateValue = row.shipDate || row.date || row.repairDate || row.updatedAt
+  const dateValue = row.shipDate || row.date || row.repairDate
   if (dateValue)
     return dayjs(dateValue)
 
   const monthKey = normalizeMonthKey(row.financeMonth || row.month)
   if (monthKey)
     return dayjs(`${monthKey.slice(0, 4)}-${monthKey.slice(4, 6)}-01`)
+
+  if (row.updatedAt)
+    return dayjs(row.updatedAt)
 
   return undefined
 }
@@ -57,14 +60,22 @@ function matches(row: Record<string, any>, filters: Record<string, any>) {
   return true
 }
 
-function comparisonHint(current: number, previous: number) {
-  if (!previous)
-    return current ? '较上月新增（上月无数据）' : '较上月持平'
+function comparison(current: number, previous: number, previousValue: string | number = previous) {
+  if (!previous) {
+    return current
+      ? { previousValue, direction: 'new' as const }
+      : { previousValue, direction: 'flat' as const, percent: 0 }
+  }
 
-  const change = (current - previous) / previous * 100
+  const change = (current - previous) / Math.abs(previous) * 100
   if (Math.abs(change) < 0.05)
-    return '较上月持平'
-  return `较上月 ${change > 0 ? '上升' : '下降'} ${Math.abs(change).toLocaleString('zh-CN', { maximumFractionDigits: 1 })}%`
+    return { previousValue, direction: 'flat' as const, percent: 0 }
+
+  return {
+    previousValue,
+    direction: change > 0 ? 'up' as const : 'down' as const,
+    percent: Math.abs(change),
+  }
 }
 
 function orderMetrics(rows: Array<Record<string, any>>) {
@@ -95,30 +106,56 @@ function summarize(moduleName: string, rows: Array<Record<string, any>>, previou
     const current = orderMetrics(rows)
     const previous = orderMetrics(previousRows)
     return [
-      { label: '总订单数', value: current.count, hint: comparisonHint(current.count, previous.count), tone: 'primary' },
-      { label: '运费总额', value: money(current.freightTotal), hint: comparisonHint(current.freightTotal, previous.freightTotal), tone: 'success' },
-      { label: '税后运费总额', value: money(current.taxedFreight), hint: comparisonHint(current.taxedFreight, previous.taxedFreight), tone: 'success' },
-      { label: '待审核订单数', value: current.pending, hint: comparisonHint(current.pending, previous.pending), tag: current.pending ? '需及时处理' : '状态正常', tone: current.pending ? 'warning' : 'success' },
+      { label: '总订单数', value: current.count, comparison: comparison(current.count, previous.count, `${previous.count} 单`), tone: 'primary' },
+      { label: '运费总额', value: money(current.freightTotal), comparison: comparison(current.freightTotal, previous.freightTotal, money(previous.freightTotal)), tone: 'success' },
+      { label: '税后运费总额', value: money(current.taxedFreight), comparison: comparison(current.taxedFreight, previous.taxedFreight, money(previous.taxedFreight)), tone: 'success' },
+      { label: '待审核订单数', value: current.pending, comparison: comparison(current.pending, previous.pending, `${previous.pending} 单`), tag: current.pending ? '需及时处理' : '状态正常', tone: current.pending ? 'warning' : 'success' },
     ]
   }
 
   if (moduleName === 'TransportFuel') {
     const amount = rows.reduce((sum, row) => sum + toNumber(row.amount), 0)
     const vehicles = new Set(rows.map(row => row.plateNo || row.name).filter(Boolean)).size
+    const previousAmount = previousRows.reduce((sum, row) => sum + toNumber(row.amount), 0)
+    const previousVehicles = new Set(previousRows.map(row => row.plateNo || row.name).filter(Boolean)).size
     return [
-      { label: '加油记录数', value: rows.length, hint: '当前筛选范围内', tone: 'primary' },
-      { label: '燃油支出', value: money(amount), hint: '加油金额合计', tone: 'danger' },
-      { label: '涉及车辆', value: vehicles, hint: '去重车牌数', tone: 'default' },
-      { label: '平均单笔', value: money(rows.length ? amount / rows.length : 0), hint: '按记录数计算', tone: 'success' },
+      { label: '加油记录数', value: rows.length, comparison: comparison(rows.length, previousRows.length, `${previousRows.length} 笔`), tone: 'primary' },
+      { label: '燃油支出', value: money(amount), comparison: comparison(amount, previousAmount, money(previousAmount)), tone: 'danger' },
+      { label: '涉及车辆', value: vehicles, comparison: comparison(vehicles, previousVehicles, `${previousVehicles} 辆`), tone: 'default' },
+      { label: '平均单笔', value: money(rows.length ? amount / rows.length : 0), comparison: comparison(rows.length ? amount / rows.length : 0, previousRows.length ? previousAmount / previousRows.length : 0, money(previousRows.length ? previousAmount / previousRows.length : 0)), tone: 'success' },
+    ]
+  }
+
+  if (moduleName === 'TransportDriverPayroll') {
+    const payrollMetrics = (source: Array<Record<string, any>>) => ({
+      attendanceDays: source
+        .filter(row => String(row.crewRole || '司机').includes('司机'))
+        .reduce((sum, row) => sum + toNumber(row.attendanceDays), 0),
+      tripCount: source.reduce((sum, row) => sum + toNumber(row.tripCount), 0),
+      pendingCount: source.filter(row => /待|核算|审批/.test(String(row.status || row.approvalStatus || '')) && !/通过|已发放/.test(String(row.status || row.approvalStatus || ''))).length,
+      netSalary: source.reduce((sum, row) => sum + toNumber(row.netSalary || row.amount), 0),
+    })
+    const current = payrollMetrics(rows)
+    const previous = payrollMetrics(previousRows)
+    return [
+      { label: '出勤天数', value: `${current.attendanceDays} 天`, comparison: comparison(current.attendanceDays, previous.attendanceDays, `${previous.attendanceDays} 天`), tone: 'primary' },
+      { label: '运输趟次', value: `${current.tripCount} 趟`, comparison: comparison(current.tripCount, previous.tripCount, `${previous.tripCount} 趟`), tone: 'default' },
+      { label: '待核算/审批', value: `${current.pendingCount} 单`, comparison: comparison(current.pendingCount, previous.pendingCount, `${previous.pendingCount} 单`), tone: current.pendingCount ? 'warning' : 'success' },
+      { label: '实发合计', value: money(current.netSalary), comparison: comparison(current.netSalary, previous.netSalary, money(previous.netSalary)), tone: 'success' },
     ]
   }
 
   const abnormal = rows.filter(row => /待|异常|预警|截止|离线/.test(String(row.status ?? ''))).length
+  const previousAbnormal = previousRows.filter(row => /待|异常|预警|截止|离线/.test(String(row.status ?? ''))).length
+  const amount = rows.reduce((sum, row) => sum + toNumber(row.amount || row.freightTotal), 0)
+  const previousAmount = previousRows.reduce((sum, row) => sum + toNumber(row.amount || row.freightTotal), 0)
+  const currentTypes = new Set(rows.map(row => row.type || row.category || row.source).filter(Boolean)).size
+  const previousTypes = new Set(previousRows.map(row => row.type || row.category || row.source).filter(Boolean)).size
   return [
-    { label: '记录总数', value: rows.length, hint: '当前筛选范围内', tone: 'primary' },
-    { label: '异常/待处理', value: abnormal, hint: `${rows.length - abnormal} 条正常`, tag: abnormal ? '需及时处理' : '状态正常', tone: abnormal ? 'warning' : 'success' },
-    { label: '金额合计', value: money(rows.reduce((sum, row) => sum + toNumber(row.amount || row.freightTotal), 0)), hint: '可识别金额字段', tone: 'success' },
-    { label: '业务类型', value: moduleName.replace(/^Transport/, ''), hint: '当前模块', tone: 'default' },
+    { label: '记录总数', value: rows.length, comparison: comparison(rows.length, previousRows.length, `${previousRows.length} 条`), tone: 'primary' },
+    { label: '异常/待处理', value: abnormal, comparison: comparison(abnormal, previousAbnormal, `${previousAbnormal} 条`), tag: abnormal ? '需及时处理' : '状态正常', tone: abnormal ? 'warning' : 'success' },
+    { label: '金额合计', value: money(amount), comparison: comparison(amount, previousAmount, money(previousAmount)), tone: 'success' },
+    { label: '业务类型数', value: currentTypes, comparison: comparison(currentTypes, previousTypes, `${previousTypes} 类`), tone: 'default' },
   ]
 }
 
@@ -127,13 +164,14 @@ export default defineEventHandler(async (event) => {
   const sourceRows = body.rows ?? []
   const filters = body.filters ?? {}
   const rows = sourceRows.filter((row: Record<string, any>) => matches(row, filters))
-  const previousFilters = String(body.moduleName ?? '') === 'TransportOrders' ? previousFinancialMonthFilters(filters) : undefined
+  const previousFilters = previousFinancialMonthFilters(filters)
   const previousRows = previousFilters
     ? sourceRows.filter((row: Record<string, any>) => matches(row, previousFilters))
     : []
+  const cards = summarize(String(body.moduleName ?? ''), rows, previousRows)
   return {
     code: 200,
     msg: '获取成功',
-    data: summarize(String(body.moduleName ?? ''), rows, previousRows),
+    data: rows.length ? cards : cards.map(card => ({ ...card, dataState: 'empty' as const })),
   }
 })

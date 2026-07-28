@@ -15,16 +15,18 @@ import {
   getGpsProviderConfigsApi,
   getGpsSyncLogsApi,
   getGpsVehiclesApi,
-  getGpsVehicleTrackApi,
   handleGpsAlarmApi,
   syncGpsAlarmsApi,
   syncGpsDevicesApi,
   syncGpsLatestLocationsApi,
   updateGpsGeofenceApi,
 } from '~@/api/gps'
+import SummaryCards from '~@/components/summary-cards/index.vue'
 import { displayGpsLocation, queueGpsChineseAddresses } from '~@/composables/gps-location-address'
 import { loadTransportOperationData, transportBaseRouteRows } from '~@/composables/transport-operation-data'
 import { createBusinessTableScrollX, displayBusinessTableValue, enhanceBusinessTableColumns, getBusinessTableValue } from '~@/utils/business-table'
+import { createFinancialComparison } from '~@/utils/financial-comparison'
+import { getCurrentFinancialMonthRange } from '~@/utils/financialPeriod'
 import { isGeofenceLocationFresh, isPointInGeofence } from '~@/utils/geofence'
 import GpsAlarmPanel from './components/gps-alarm-panel.vue'
 import GpsDevicePanel from './components/gps-device-panel.vue'
@@ -32,6 +34,8 @@ import GpsGeofencePanel from './components/gps-geofence-panel.vue'
 import GpsLogPanel from './components/gps-log-panel.vue'
 import GpsProviderPanel from './components/gps-provider-panel.vue'
 import GpsTrackPanel from './components/gps-track-panel.vue'
+import { useGpsTrackQuery } from './composables/use-gps-track-query'
+import { summarizeGpsAlarms } from './utils/gps-financial-summary'
 
 defineOptions({
   name: 'TransportGpsMonitor',
@@ -40,7 +44,6 @@ defineOptions({
 const message = useMessage()
 const userStore = useUserStore()
 const route = useRoute()
-
 const loading = ref(false)
 const syncing = ref(false)
 const autoRefreshing = ref(false)
@@ -54,11 +57,9 @@ const selectedDeviceId = ref('')
 const provider = ref<'808gps'>('808gps')
 const keyword = ref('')
 const onlineFilter = ref<'all' | 'online' | 'offline'>('all')
-
 const vehicles = ref<TransportVehicle[]>([])
 const devices = ref<GpsDevice[]>([])
 const mapData = ref<GpsMapData>()
-const trackPoints = ref<GpsLocationLatest[]>([])
 const providerConfigs = ref<any[]>([])
 const syncLogs = ref<any[]>([])
 const operationLogs = ref<any[]>([])
@@ -72,21 +73,28 @@ let clusterLabelLayer: any
 let trackLayer: any
 let geofenceLayer: any
 let geofenceLabelLayer: any
-
-const trackRange = ref<[any, any]>()
 const playing = ref(false)
 const playSpeed = ref(1)
 const playIndex = ref(0)
 let playTimer: ReturnType<typeof setInterval> | undefined
 let dataRefreshTimer: ReturnType<typeof setInterval> | undefined
-
+const { trackLoading, trackPoints, trackRange, loadTrack } = useGpsTrackQuery({
+  message,
+  selectedVehicleId,
+  provider,
+  pause: pauseTrack,
+  onLoaded: () => {
+    playIndex.value = 0
+    activeTab.value = 'tracks'
+  },
+})
 const alarmTypeFilter = ref('all')
 const alarmStatusFilter = ref('all')
 const alarmRemark = ref('已处理并通知司机')
-
+const fenceSaving = ref(false)
 const fenceForm = reactive<GpsFenceForm>({
   id: '',
-  name: '新建电子围栏',
+  name: '',
   address: '',
   routeCode: '',
   routeStage: 'loading' as 'loading' | 'unloading',
@@ -98,7 +106,6 @@ const fenceForm = reactive<GpsFenceForm>({
   enabled: true,
   vehicleIds: [] as string[],
 })
-
 const locations = computed(() => mapData.value?.locations ?? [])
 const alarms = computed(() => mapData.value?.alarms ?? [])
 const vehicleStatuses = computed(() => mapData.value?.vehicles ?? [])
@@ -191,23 +198,19 @@ const filteredAlarms = computed(() => {
   }).sort((a, b) => new Date(b.alarmTime).getTime() - new Date(a.alarmTime).getTime())
 })
 
-const overview = computed(() => {
-  const online = vehicleStatuses.value.filter(item => item.onlineStatus === 'online').length
-  const offline = vehicleStatuses.value.filter(item => item.onlineStatus === 'offline').length
-  return {
-    total: vehicleStatuses.value.length,
-    online,
-    offline,
-    alarms: alarms.value.filter(item => item.status === 'unhandled').length,
-  }
+const monitorStats = computed(() => {
+  const currentPeriod = getCurrentFinancialMonthRange()
+  const current = summarizeGpsAlarms(alarms.value, currentPeriod.startDate, currentPeriod.endDate)
+  const previousStartDate = currentPeriod.startAt.subtract(1, 'month').format('YYYY-MM-DD')
+  const previousEndDate = currentPeriod.endAt.subtract(1, 'month').format('YYYY-MM-DD')
+  const previous = summarizeGpsAlarms(alarms.value, previousStartDate, previousEndDate)
+  return [
+    { label: '本月报警数', value: current.total, comparison: createFinancialComparison(current.total, previous.total, `${previous.total} 条`), tone: 'default' as const },
+    { label: '本月已处理', value: current.handled, comparison: createFinancialComparison(current.handled, previous.handled, `${previous.handled} 条`), tone: 'success' as const },
+    { label: '本月未处理', value: current.unhandled, comparison: createFinancialComparison(current.unhandled, previous.unhandled, `${previous.unhandled} 条`), tag: current.unhandled ? '需处理' : '正常', tone: current.unhandled ? 'danger' as const : 'success' as const },
+    { label: '本月涉及车辆', value: current.vehicles, comparison: createFinancialComparison(current.vehicles, previous.vehicles, `${previous.vehicles} 辆`), tone: 'primary' as const },
+  ]
 })
-
-const monitorStats = computed(() => [
-  { label: '车辆总数', value: overview.value.total, hint: '已纳入北斗监管', tone: 'default' },
-  { label: '在线车辆', value: overview.value.online, hint: `${overview.value.total ? Math.round((overview.value.online / overview.value.total) * 100) : 0}% 在线率`, tone: 'success' },
-  { label: '离线车辆', value: overview.value.offline, hint: '需关注设备或信号', tone: 'warning' },
-  { label: '未处理报警', value: overview.value.alarms, hint: '超速、围栏、离线等', tone: overview.value.alarms ? 'danger' : 'success' },
-])
 
 const selectedBind = computed(() => mapData.value?.binds.find(item => item.vehicleId === selectedVehicleId.value))
 const selectedDevice = computed(() => devices.value.find(item => item.deviceId === selectedBind.value?.deviceId || item.deviceId === selectedDeviceId.value))
@@ -649,12 +652,11 @@ function initializeActualMap() {
   })
   mapScene.on('loaded', renderActualMap)
 }
-
 async function loadData() {
   loading.value = true
   errorMessage.value = ''
   try {
-    const [vehicleRes, deviceRes, mapRes, providerRes, logRes, opLogRes] = await Promise.all([
+    const [vehicleResult, deviceResult, mapResult, providerResult, logResult, opLogResult] = await Promise.allSettled([
       getGpsVehiclesApi(),
       getGpsDevicesApi(),
       getGpsMapDataApi(),
@@ -662,15 +664,23 @@ async function loadData() {
       getGpsSyncLogsApi(),
       getGpsOperationLogsApi(),
     ])
-    vehicles.value = vehicleRes.data ?? []
-    devices.value = deviceRes.data ?? []
-    mapData.value = mapRes.data
-    providerConfigs.value = providerRes.data ?? []
+    vehicles.value = vehicleResult.status === 'fulfilled' ? (vehicleResult.value.data ?? []) : vehicles.value
+    devices.value = deviceResult.status === 'fulfilled' ? (deviceResult.value.data ?? []) : devices.value
+    mapData.value = mapResult.status === 'fulfilled' ? mapResult.value.data : mapData.value
+    providerConfigs.value = providerResult.status === 'fulfilled' ? (providerResult.value.data ?? []) : providerConfigs.value
+    syncLogs.value = logResult.status === 'fulfilled' ? (logResult.value.data ?? []) : syncLogs.value
+    operationLogs.value = opLogResult.status === 'fulfilled' ? (opLogResult.value.data ?? []) : operationLogs.value
     provider.value = providerConfigs.value.find(item => item.enabled)?.provider || provider.value
-    syncLogs.value = logRes.data ?? []
-    operationLogs.value = opLogRes.data ?? []
     selectRouteVehicle()
     selectedDeviceId.value ||= devices.value[0]?.deviceId || ''
+    const failedCount = [vehicleResult, deviceResult, mapResult, providerResult, logResult, opLogResult].filter(result => result.status === 'rejected').length
+    if (mapResult.status === 'rejected') {
+      const timedOut = mapResult.reason?.code === 'ECONNABORTED' || String(mapResult.reason?.message ?? '').includes('timeout')
+      errorMessage.value = timedOut ? '北斗定位数据响应超时，已保留其他已加载内容，请稍后点击“刷新数据”重试' : (mapResult.reason?.response?.data?.msg || mapResult.reason?.message || '北斗定位数据加载失败')
+    }
+    else if (failedCount) {
+      errorMessage.value = `${failedCount} 项辅助数据暂未加载，车辆定位数据仍可正常使用`
+    }
   }
   catch (error: any) {
     errorMessage.value = error?.message || 'GPS 数据加载失败'
@@ -680,7 +690,6 @@ async function loadData() {
     loading.value = false
   }
 }
-
 async function syncDevices() {
   syncing.value = true
   try {
@@ -755,21 +764,6 @@ async function bindDevice() {
   await loadData()
 }
 
-async function loadTrack(vehicleId = selectedVehicleId.value) {
-  if (!vehicleId) {
-    message.warning('请选择车辆')
-    return
-  }
-  const res = await getGpsVehicleTrackApi(vehicleId, {
-    startTime: trackRange.value?.[0]?.toISOString?.(),
-    endTime: trackRange.value?.[1]?.toISOString?.(),
-    provider: provider.value,
-  })
-  trackPoints.value = res.data?.points ?? []
-  playIndex.value = 0
-  activeTab.value = 'tracks'
-}
-
 function playTrack() {
   if (!trackClassifiedPoints.value.length)
     return
@@ -798,11 +792,9 @@ async function handleAlarm(record: GpsAlarmRecord, status: 'handled' | 'ignored'
   message.success(status === 'handled' ? '报警已处理' : '报警已忽略')
   await loadData()
 }
-
 function handleAlarmRecord(record: Record<string, any>, status: 'handled' | 'ignored') {
   return handleAlarm(record as GpsAlarmRecord, status)
 }
-
 function editFence(record: GpsGeofence) {
   fenceForm.id = record.id
   fenceForm.name = record.name
@@ -819,11 +811,10 @@ function editFence(record: GpsGeofence) {
   activeTab.value = 'fences'
   focusFence(record)
 }
-
 function resetFenceForm() {
   Object.assign(fenceForm, {
     id: '',
-    name: '新建电子围栏',
+    name: '',
     address: '',
     routeCode: '',
     routeStage: 'loading',
@@ -836,7 +827,6 @@ function resetFenceForm() {
     vehicleIds: [],
   })
 }
-
 async function saveFence() {
   const points = fenceForm.polygonPoints.split(/\n|;/)
     .map(item => item.trim())
@@ -846,9 +836,17 @@ async function saveFence() {
     message.warning('请输入围栏名称')
     return
   }
+  if (geofences.value.some(item => item.name.trim() === fenceForm.name.trim() && item.id !== fenceForm.id)) {
+    message.warning('围栏名称已存在')
+    return
+  }
   if (fenceForm.shape === 'circle' && (!Number.isFinite(fenceForm.centerLongitude) || !Number.isFinite(fenceForm.centerLatitude)
     || Math.abs(fenceForm.centerLongitude) > 180 || Math.abs(fenceForm.centerLatitude) > 90)) {
     message.warning('请输入有效的中心点经纬度')
+    return
+  }
+  if (fenceForm.shape === 'circle' && (fenceForm.radius < 100 || fenceForm.radius > 500000)) {
+    message.warning('围栏半径应在 100 至 500000 米之间')
     return
   }
   if (fenceForm.shape === 'polygon' && (points.length < 3 || points.some(([longitude, latitude]) => !Number.isFinite(longitude) || !Number.isFinite(latitude)
@@ -869,16 +867,27 @@ async function saveFence() {
     enabled: fenceForm.enabled,
     ...operatorPayload(),
   }
-  const res = fenceForm.id
-    ? await updateGpsGeofenceApi(fenceForm.id, payload)
-    : await createGpsGeofenceApi(payload)
-  await bindGpsGeofenceVehiclesApi(res.data!.id, {
-    vehicleIds: fenceForm.vehicleIds,
-    ...operatorPayload(),
-  })
-  message.success('围栏已保存')
-  resetFenceForm()
-  await loadData()
+  fenceSaving.value = true
+  try {
+    const res = fenceForm.id
+      ? await updateGpsGeofenceApi(fenceForm.id, payload)
+      : await createGpsGeofenceApi(payload)
+    if (!res.data?.id)
+      throw new Error(res.msg || '围栏保存结果无效')
+    await bindGpsGeofenceVehiclesApi(res.data.id, {
+      vehicleIds: fenceForm.vehicleIds,
+      ...operatorPayload(),
+    })
+    message.success('围栏已保存')
+    resetFenceForm()
+    await loadData()
+  }
+  catch (error: any) {
+    message.error(error?.message || '围栏保存失败')
+  }
+  finally {
+    fenceSaving.value = false
+  }
 }
 
 onMounted(initializeMonitor)
@@ -942,13 +951,7 @@ watch(locations, value => queueGpsChineseAddresses(value), { deep: true, immedia
 
     <a-alert v-if="errorMessage" mb-4 type="error" show-icon :message="errorMessage" closable @close="errorMessage = ''" />
 
-    <section class="monitor-stats">
-      <div v-for="item in monitorStats" :key="item.label" class="monitor-stat" :class="`is-${item.tone}`">
-        <span>{{ item.label }}</span>
-        <strong>{{ item.value }}</strong>
-        <small>{{ item.hint }}</small>
-      </div>
-    </section>
+    <SummaryCards :cards="monitorStats" compact />
 
     <section class="monitor-workspace">
       <aside class="vehicle-panel">
@@ -1133,6 +1136,7 @@ watch(locations, value => queueGpsChineseAddresses(value), { deep: true, immedia
             :columns="trackTableColumns"
             :scroll-x="trackTableScrollX"
             :current-point="currentTrackPoint"
+            :loading="trackLoading"
             :playing="playing"
             :last-sync-at="lastAlarmSyncAt"
             :status-color="statusColor"
@@ -1168,6 +1172,7 @@ watch(locations, value => queueGpsChineseAddresses(value), { deep: true, immedia
             :routes="routeOptions"
             :judgments="fenceJudgments"
             :selected-location="selectedLocation"
+            :saving="fenceSaving"
             @route-change="applyRouteFenceDefaults"
             @use-selected-location="useSelectedVehicleLocation"
             @save="saveFence"

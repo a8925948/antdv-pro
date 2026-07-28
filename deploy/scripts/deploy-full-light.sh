@@ -6,11 +6,18 @@ WEB_CONTAINER="${WEB_CONTAINER:-enterprise-system-web-1}"
 API_CONTAINER="${API_CONTAINER:-enterprise-system-api-1}"
 READY_URL="${READY_URL:-https://www.erpxt.online/api/readyz}"
 SITE_URL="${SITE_URL:-https://www.erpxt.online/}"
+LOCK_DIR="${DEPLOY_LOCK_DIR:-/tmp/enterprise-system-deploy.lock}"
 ROLLBACK_DIR="$(mktemp -d)"
 DEPLOYED=false
 
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+  echo "[deploy:full] another deployment is already running: $LOCK_DIR" >&2
+  exit 2
+fi
+
 cleanup() {
   rm -rf "$ROLLBACK_DIR"
+  rmdir "$LOCK_DIR" 2>/dev/null || true
 }
 
 clear_container_dir() {

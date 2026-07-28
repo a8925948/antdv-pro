@@ -131,7 +131,7 @@ export default ({ mode }: ConfigEnv): UserConfig => {
     },
     test: {
       environment: 'node',
-      exclude: [...configDefaults.exclude, 'tmp/**'],
+      exclude: [...configDefaults.exclude, 'tmp/**', '.codex-tmp/**'],
       coverage: {
         provider: 'v8',
         reporter: ['text', 'json-summary', 'html'],
