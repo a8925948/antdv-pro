@@ -542,13 +542,138 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 10px 12px;
+  gap: 20px;
+  padding: 14px 16px;
   border-radius: 6px;
   background: #f8fafc;
 
+  > div {
+    display: flex;
+    min-width: 0;
+    flex-wrap: wrap;
+    gap: 4px 12px;
+    align-items: baseline;
+  }
+
+  span {
+    color: var(--admin-text);
+    font-weight: 650;
+  }
+
+  small {
+    color: var(--admin-text-secondary);
+    font-size: 13px;
+  }
+
   strong {
-    color: #1677ff;
-    font-size: 16px;
+    flex: 0 0 auto;
+    color: var(--admin-primary);
+    font-size: 20px;
+    font-variant-numeric: tabular-nums;
+    line-height: 1.2;
+  }
+}
+
+.receipt-allocation-meta {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(120px, 1fr) minmax(120px, 1fr);
+  gap: 14px 20px;
+  padding: 16px;
+  border: 1px solid var(--admin-border-subtle);
+  border-radius: 6px;
+  background: var(--admin-surface-muted);
+}
+
+.receipt-allocation-meta__item {
+  display: grid;
+  min-width: 0;
+  gap: 5px;
+
+  > span {
+    color: var(--admin-text-secondary);
+    font-size: 13px;
+    font-weight: 600;
+  }
+
+  > strong {
+    min-width: 0;
+    color: var(--admin-text);
+    font-size: 15px;
+    font-variant-numeric: tabular-nums;
+    overflow-wrap: anywhere;
+  }
+
+  &:first-child {
+    grid-column: 1 / -1;
+  }
+}
+
+.receipt-allocation-account-select {
+  width: min(100%, 560px);
+}
+
+.receipt-allocation-posting-alert {
+  margin-top: 14px;
+}
+
+.receipt-allocation-workspace {
+  margin-top: 18px;
+}
+
+.receipt-allocation-list {
+  border-top: 1px solid var(--admin-border-subtle);
+}
+
+.receipt-allocation-row {
+  display: grid;
+  grid-template-columns: minmax(280px, 1fr) minmax(180px, 0.5fr) 64px;
+  gap: 16px;
+  align-items: start;
+  padding: 16px 0;
+  border-bottom: 1px solid var(--admin-border-subtle);
+}
+
+.receipt-allocation-field {
+  display: grid;
+  min-width: 0;
+  gap: 6px;
+}
+
+.receipt-allocation-field__label {
+  color: var(--admin-text-secondary);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.receipt-allocation-field__hint {
+  min-height: 18px;
+  color: var(--admin-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.receipt-allocation-receivable,
+.receipt-allocation-amount {
+  width: 100%;
+}
+
+.receipt-allocation-delete {
+  align-self: start;
+  margin-top: 25px;
+  padding-inline: 4px;
+}
+
+.receipt-allocation-add {
+  margin-top: 14px;
+}
+
+.receipt-allocation-workspace + .receipt-allocation-summary {
+  margin-top: 18px;
+}
+
+:global(.receipt-allocation-modal) {
+  .ant-modal-body {
+    padding-top: 20px;
   }
 }
 
@@ -679,6 +804,14 @@
 }
 
 @media (max-width: 900px) {
+  .receipt-allocation-meta {
+    grid-template-columns: minmax(0, 1.5fr) minmax(120px, 1fr) minmax(120px, 1fr);
+  }
+
+  .receipt-allocation-row {
+    grid-template-columns: minmax(0, 1fr) minmax(180px, 0.55fr) 64px;
+  }
+
   .salary-period-head,
   .salary-action-bar {
     flex-direction: column;
@@ -700,6 +833,49 @@
 
   .dashboard-funds-grid {
     grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 640px) {
+  .receipt-allocation-meta {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 12px;
+    padding: 14px;
+  }
+
+  .receipt-allocation-meta__item:first-child,
+  .receipt-allocation-meta__item:nth-child(2) {
+    grid-column: 1 / -1;
+  }
+
+  .receipt-allocation-row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 12px;
+    padding: 14px 0;
+  }
+
+  .receipt-allocation-delete {
+    width: fit-content;
+    min-height: 36px;
+    margin-top: -4px;
+  }
+
+  .receipt-allocation-add {
+    width: 100%;
+  }
+
+  .receipt-allocation-summary {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 10px;
+
+    > div {
+      display: grid;
+    }
+
+    strong {
+      align-self: flex-end;
+    }
   }
 }
 

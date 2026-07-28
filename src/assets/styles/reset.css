@@ -376,6 +376,10 @@ button:focus-visible,
   margin-inline-start: 8px;
 }
 
+.ant-modal-root .ant-modal-footer > .ant-btn {
+  min-width: 88px;
+}
+
 .ant-modal-root .ant-modal-footer .ant-space {
   flex-wrap: wrap;
   justify-content: flex-end;
@@ -392,6 +396,28 @@ button:focus-visible,
 
 .ant-modal-root .ant-form-item-label {
   padding-bottom: 4px;
+}
+
+.ant-modal-root .ant-form-item-control,
+.ant-modal-root .ant-form-item-control-input,
+.ant-modal-root .ant-form-item-control-input-content,
+.ant-drawer .ant-form-item-control,
+.ant-drawer .ant-form-item-control-input,
+.ant-drawer .ant-form-item-control-input-content {
+  min-width: 0;
+}
+
+.ant-modal-root .ant-form-item-control-input-content > .ant-input,
+.ant-modal-root .ant-form-item-control-input-content > .ant-input-affix-wrapper,
+.ant-modal-root .ant-form-item-control-input-content > .ant-input-number,
+.ant-modal-root .ant-form-item-control-input-content > .ant-picker,
+.ant-modal-root .ant-form-item-control-input-content > .ant-select,
+.ant-drawer .ant-form-item-control-input-content > .ant-input,
+.ant-drawer .ant-form-item-control-input-content > .ant-input-affix-wrapper,
+.ant-drawer .ant-form-item-control-input-content > .ant-input-number,
+.ant-drawer .ant-form-item-control-input-content > .ant-picker,
+.ant-drawer .ant-form-item-control-input-content > .ant-select {
+  width: 100%;
 }
 
 .ant-modal-root .ant-input,
@@ -455,6 +481,34 @@ button:focus-visible,
 
 .ant-spin-nested-loading {
   min-width: 0;
+}
+
+/* Shared query-bar behavior for operation-heavy pages. */
+.ant-form-inline {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 16px;
+  align-items: flex-end;
+}
+
+.ant-form-inline .ant-form-item {
+  min-width: 0;
+  margin: 0;
+}
+
+.ant-form-inline .ant-form-item-control,
+.ant-form-inline .ant-form-item-control-input,
+.ant-form-inline .ant-form-item-control-input-content {
+  min-width: 0;
+}
+
+.ant-form-inline .query-actions {
+  margin-inline-start: auto;
+}
+
+.ant-form-inline .query-actions .ant-form-item-control-input-content {
+  display: flex;
+  justify-content: flex-end;
 }
 
 .ant-skeleton-title,
@@ -731,6 +785,38 @@ html.dark .ant-table-wrapper .ant-table-cell-fix-right {
 
   .ant-modal-root .ant-modal-footer .ant-btn + .ant-btn {
     margin-inline-start: 0;
+  }
+
+  .ant-form-inline {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 12px;
+  }
+
+  .ant-form-inline .ant-form-item,
+  .ant-form-inline .ant-form-item-control,
+  .ant-form-inline .ant-form-item-control-input,
+  .ant-form-inline .ant-form-item-control-input-content,
+  .ant-form-inline .ant-input,
+  .ant-form-inline .ant-input-affix-wrapper,
+  .ant-form-inline .ant-input-number,
+  .ant-form-inline .ant-picker,
+  .ant-form-inline .ant-select {
+    width: 100%;
+  }
+
+  .ant-form-inline .query-actions {
+    margin-inline-start: 0;
+  }
+
+  .ant-form-inline .query-actions .ant-form-item-control-input-content,
+  .ant-form-inline .query-actions .ant-space {
+    width: 100%;
+  }
+
+  .ant-form-inline .query-actions .ant-space-item,
+  .ant-form-inline .query-actions .ant-btn {
+    flex: 1 1 0;
   }
 
   .ant-drawer-content-wrapper {
