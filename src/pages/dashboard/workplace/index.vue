@@ -769,7 +769,7 @@ onMounted(() => {
         class="expiry-detail-table"
         :data-source="selectedExpiryWarnings"
         :pagination="false"
-        :row-key="record => record.key"
+        :row-key="(record: ExpiryWarningItem) => record.key"
         :custom-row="expiryRowProps"
         size="middle"
         :scroll="{ y: 420 }"
