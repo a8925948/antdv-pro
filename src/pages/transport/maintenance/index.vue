@@ -599,7 +599,8 @@ function renderChart() {
         },
       },
       interactions: [{ type: 'element-active' }],
-      appendPadding: [8, 20, 4, 12],
+      // Reserve space for the top label above the tallest column.
+      appendPadding: [32, 20, 4, 12],
     })
     chart.value.render()
     return
