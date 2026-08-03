@@ -107,6 +107,7 @@ export default {
   'menu.transport.vehicle-loans': '车贷费用',
   'menu.transport.bill-reconciliation': '账单核对',
   'menu.transport.base-data': '基础数据',
+  'menu.transport.site-credentials': '帐号网址',
   'menu.trade': '贸易管理',
   'menu.trade.orders': '贸易订单',
   'menu.hotel': '酒店管理',

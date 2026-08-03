@@ -107,6 +107,7 @@ export default {
   'menu.transport.vehicle-loans': 'Vehicle Loans',
   'menu.transport.bill-reconciliation': 'Bill Reconciliation',
   'menu.transport.base-data': 'Base Data',
+  'menu.transport.site-credentials': 'Account & Websites',
   'menu.trade': 'Trade Management',
   'menu.trade.orders': 'Trade Orders',
   'menu.hotel': 'Hotel Management',
