@@ -281,6 +281,15 @@ export default [
           locale: 'menu.transport.base-data',
         },
       },
+      {
+        path: '/transport/site-credentials',
+        name: 'TransportSiteCredentials',
+        component: () => import('~/pages/transport/site-credentials/index.vue'),
+        meta: {
+          title: '帐号网址',
+          locale: 'menu.transport.site-credentials',
+        },
+      },
     ],
   },
   {
