@@ -20,7 +20,7 @@ import FinancialPeriodFilter from '~@/components/financial-period-filter/index.v
 import SummaryCards from '~@/components/summary-cards/index.vue'
 import { useFinancialPeriodFilter } from '~@/composables/financial-period-filter'
 import { displayGpsLocation, filterGpsFencesForRoute, findNearbyGpsFence, queueGpsChineseAddresses, resolveGpsRouteStageByAddress } from '~@/composables/gps-location-address'
-import { calculateCustomerBidBalance, flushTransportOperationData, loadTransportOperationData, syncDriverPayrollFromBaseData, syncTransportCustomersFromOrders, transportBaseCompanyRows, transportBaseCrewRows, transportBaseCustomerRows, transportBaseRouteRows, transportBaseVehicleRows, transportDriverPayrollRows, transportEtcRows, transportFuelRows, transportOperationError, transportOperationLoading, transportOrderRows } from '~@/composables/transport-operation-data'
+import { calculateCustomerBidBalance, flushTransportOperationData, loadTransportOperationData, refreshTransportOperationDataForOrderSave, syncDriverPayrollFromBaseData, syncTransportCustomersFromOrders, transportBaseCompanyRows, transportBaseCrewRows, transportBaseCustomerRows, transportBaseRouteRows, transportBaseVehicleRows, transportDriverPayrollRows, transportEtcRows, transportFuelRows, transportOperationError, transportOperationLoading, transportOrderRows } from '~@/composables/transport-operation-data'
 import { createBusinessTableScrollX } from '~@/utils/business-table'
 import {
   financialMonthKey,
@@ -685,7 +685,14 @@ const vehicleOptions = computed(() => {
 
 const customerOptions = computed(() => {
   baseDataVersion.value
-  return getBaseCustomerRows().map(row => ({
+  const seen = new Set<string>()
+  return getBaseCustomerRows().filter((row) => {
+    const key = String(row.name ?? '').trim().replace(/\s+/g, ' ')
+    if (!key || seen.has(key))
+      return false
+    seen.add(key)
+    return true
+  }).map(row => ({
     value: row.name,
     label: `${row.name}${row.area ? ` / ${row.area}` : ''}`,
     row,
@@ -1474,7 +1481,14 @@ const driverPayrollVehicleOptions = computed(() => {
 })
 const baseCustomerOptions = computed(() => {
   baseDataVersion.value
-  return getBaseCustomerRows().map(row => ({
+  const seen = new Set<string>()
+  return getBaseCustomerRows().filter((row) => {
+    const key = String(row.name ?? '').trim().replace(/\s+/g, ' ')
+    if (!key || seen.has(key))
+      return false
+    seen.add(key)
+    return true
+  }).map(row => ({
     value: row.name,
     label: `${row.name}${row.area ? ` / ${row.area}` : ''}${row.contact ? ` / ${row.contact}` : ''}`,
     row,
@@ -3573,26 +3587,30 @@ async function submitOrderForm() {
   orderForm.financeMonth = normalizeFinanceMonth(orderForm.financeMonth, orderForm.shipDate)
   orderForm.sentWeight = formatOrderWeight(orderForm.sentWeight)
   orderForm.receivedWeight = formatOrderWeight(orderForm.receivedWeight)
-  const snapshot = {
-    orders: cloneDeep(orderRows.value),
-    customers: cloneDeep(transportBaseCustomerRows.value),
-    routes: cloneDeep(transportBaseRouteRows.value),
-  }
-  const newOrder = decorateOrderRecord({ ...orderForm })
-  if (editingOrderCode.value) {
-    const index = orderRows.value.findIndex(row => row.code === editingOrderCode.value)
-    if (index > -1)
-      orderRows.value[index] = newOrder
-  }
-  else {
-    orderRows.value = [newOrder, ...orderRows.value]
-  }
-  recalculateAllDriverPayroll()
-  syncTransportCustomersFromOrders()
-  baseDataVersion.value += 1
-  orderImportSummary.value = buildOrderSummary(orderRows.value)
   orderSaving.value = true
+  const newOrder = decorateOrderRecord({ ...orderForm })
+  let snapshot: { orders: any[], customers: any[], routes: any[] } | undefined
   try {
+    await refreshTransportOperationDataForOrderSave()
+    if (transportOperationError.value)
+      throw new Error(transportOperationError.value)
+    snapshot = {
+      orders: cloneDeep(orderRows.value),
+      customers: cloneDeep(transportBaseCustomerRows.value),
+      routes: cloneDeep(transportBaseRouteRows.value),
+    }
+    if (editingOrderCode.value) {
+      const index = orderRows.value.findIndex(row => row.code === editingOrderCode.value)
+      if (index > -1)
+        orderRows.value[index] = newOrder
+    }
+    else {
+      orderRows.value = [newOrder, ...orderRows.value]
+    }
+    recalculateAllDriverPayroll()
+    syncTransportCustomersFromOrders()
+    baseDataVersion.value += 1
+    orderImportSummary.value = buildOrderSummary(orderRows.value)
     await nextTick()
     await flushTransportOperationData()
     orderModalOpen.value = false
@@ -3600,9 +3618,11 @@ async function submitOrderForm() {
     editingOrderCode.value = ''
   }
   catch (error: any) {
-    orderRows.value = snapshot.orders
-    transportBaseCustomerRows.value.splice(0, transportBaseCustomerRows.value.length, ...snapshot.customers)
-    transportBaseRouteRows.value.splice(0, transportBaseRouteRows.value.length, ...snapshot.routes)
+    if (snapshot) {
+      orderRows.value = snapshot.orders
+      transportBaseCustomerRows.value.splice(0, transportBaseCustomerRows.value.length, ...snapshot.customers)
+      transportBaseRouteRows.value.splice(0, transportBaseRouteRows.value.length, ...snapshot.routes)
+    }
     message.error(error?.message || '运单保存失败，已恢复修改前数据')
   }
   finally {

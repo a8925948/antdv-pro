@@ -663,6 +663,22 @@ export async function flushTransportOperationData(options: { confirmDestructiveR
   await saveTransportOperationData(options)
 }
 
+/**
+ * Synchronize before workflows that edit a single order. Automatic persistence
+ * may still be queued when the user clicks Save; wait for it before taking a
+ * fresh revision so the modal cannot submit against an older snapshot.
+ */
+export async function refreshTransportOperationDataForOrderSave() {
+  if (persistTimer) {
+    clearTimeout(persistTimer)
+    persistTimer = undefined
+  }
+  if (transportOperationDirty.value)
+    await saveTransportOperationData()
+  await saveQueue.catch(() => undefined)
+  await loadTransportOperationData({ force: true })
+}
+
 function schedulePersist() {
   if (!transportOperationHydrated.value || applyingRemoteData)
     return

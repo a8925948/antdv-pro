@@ -5,6 +5,7 @@ import {
   flushTransportOperationData,
   loadTransportOperationData,
   normalizeTransportBaseRouteFuelUnits,
+  refreshTransportOperationDataForOrderSave,
   saveTransportOperationData,
   syncDriverPayrollFromBaseData,
   syncTransportCustomersFromOrders,
@@ -17,6 +18,7 @@ import {
   transportFuelRows,
   transportInventoryMovementRows,
   transportMaintenanceRows,
+  transportOperationDirty,
   transportOperationError,
   transportOperationHydrated,
   transportOperationLoading,
@@ -48,6 +50,7 @@ describe('transport operation shared data', () => {
     vi.stubGlobal('localStorage', { getItem: vi.fn(() => 'session-token') })
     vi.stubGlobal('fetch', vi.fn())
     transportOperationHydrated.value = false
+    transportOperationDirty.value = false
     transportOperationLoading.value = false
     transportOperationError.value = ''
     allRows.forEach(rows => rows.value.splice(0))
@@ -159,6 +162,21 @@ describe('transport operation shared data', () => {
     expect(fetch).not.toHaveBeenCalled()
   })
 
+  it('waits for queued persistence before refreshing an order-save revision', async () => {
+    transportOperationHydrated.value = true
+    transportOperationDirty.value = true
+    transportOrderRows.value.push({ code: 'O-queued' } as any)
+    vi.mocked(fetch)
+      .mockReturnValueOnce(apiResponse({ code: 200, revision: 'r2' }))
+      .mockReturnValueOnce(apiResponse({ code: 200, revision: 'r3', data: { orders: [{ code: 'O-server' }] } }))
+
+    await refreshTransportOperationDataForOrderSave()
+
+    expect(fetch).toHaveBeenCalledTimes(2)
+    expect((vi.mocked(fetch).mock.calls[0][1] as RequestInit).method).toBe('PUT')
+    expect(transportOrderRows.value).toEqual([{ code: 'O-server' }])
+  })
+
   it('saves a detached dataset and clears an earlier error', async () => {
     transportOrderRows.value.push({ code: 'O-2', customer: '乙公司' } as any)
     transportBaseVehicleRows.value.push({ code: 'V-2' })
@@ -190,6 +208,14 @@ describe('transport operation shared data', () => {
     expect(transportBaseCustomerRows.value[0]).toMatchObject({ code: 'KH008', contact: '张经理', bidAmount: '500000' })
     expect(transportBaseCustomerRows.value[1]).toMatchObject({ code: 'KH009', name: '乙公司', progress: '0', source: '运输订单' })
     expect(syncTransportCustomersFromOrders()).toBe(false)
+  })
+
+  it('does not add a customer when an existing archive differs only by whitespace', () => {
+    transportBaseCustomerRows.value.push({ code: 'KH001', name: '昆仑物流陕西分公司' })
+    transportOrderRows.value.push({ code: 'O-1', customer: ' 昆仑物流陕西分公司 ' } as any)
+
+    expect(syncTransportCustomersFromOrders()).toBe(false)
+    expect(transportBaseCustomerRows.value).toHaveLength(1)
   })
 
   it('calculates bid balance from matching orders on and after the customer start date', () => {

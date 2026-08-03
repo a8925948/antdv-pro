@@ -110,6 +110,25 @@ describe('transport operation store', () => {
     expect(result.baseCustomers[1]).toMatchObject({ code: 'KH006', name: '乙公司', progress: '0', source: '运输订单' })
   })
 
+  it('collapses duplicate customer archives by normalized name', async () => {
+    mocks.readJsonFile.mockReturnValue({
+      baseCustomers: [
+        { code: 'KH001', name: '昆仑物流陕西分公司', area: '陕西', contact: '' },
+        { code: 'KH099', name: ' 昆仑物流陕西分公司 ', area: '', contact: '张经理' },
+      ],
+    })
+
+    const result = await transportOperationStore.getDataset()
+
+    expect(result.baseCustomers).toHaveLength(1)
+    expect(result.baseCustomers[0]).toMatchObject({
+      code: 'KH001',
+      name: '昆仑物流陕西分公司',
+      area: '陕西',
+      contact: '张经理',
+    })
+  })
+
   it('shares valid order vehicles but keeps configured route archives unchanged', async () => {
     mocks.readJsonFile.mockReturnValue({
       orders: [

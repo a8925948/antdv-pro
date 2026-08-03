@@ -48,10 +48,36 @@ function normalizeDataset(data: Partial<TransportOperationDataset>): TransportOp
     baseCrews: Array.isArray(data.baseCrews) ? data.baseCrews : [],
     baseRoutes: Array.isArray(data.baseRoutes) ? data.baseRoutes.filter(record => !isOrderDerivedRoute(record)) : [],
   }
+  dedupeBaseCustomers(dataset)
   normalizeDatasetPlateNos(dataset)
   syncCustomersFromOrders(dataset)
   syncVehiclesFromOrders(dataset)
   return dataset
+}
+
+function normalizeCustomerName(value: unknown) {
+  return String(value ?? '').trim().replace(/\s+/g, ' ')
+}
+
+/** Keep one customer archive per normalized name while retaining fields from duplicate rows. */
+function dedupeBaseCustomers(dataset: TransportOperationDataset) {
+  const byName = new Map<string, Record<string, any>>()
+  dataset.baseCustomers = dataset.baseCustomers.filter((record) => {
+    const name = normalizeCustomerName(record?.name)
+    if (!name)
+      return true
+    record.name = name
+    const existing = byName.get(name)
+    if (!existing) {
+      byName.set(name, record)
+      return true
+    }
+    Object.entries(record).forEach(([key, value]) => {
+      if ((existing as any)[key] == null || String((existing as any)[key]).trim() === '')
+        (existing as any)[key] = value
+    })
+    return false
+  })
 }
 
 function normalizePlateNo(value: unknown) {
@@ -88,14 +114,14 @@ function normalizeDatasetPlateNos(dataset: TransportOperationDataset) {
 }
 
 function syncCustomersFromOrders(dataset: TransportOperationDataset) {
-  const names = new Set(dataset.baseCustomers.map(record => String(record?.name ?? '').trim()).filter(Boolean))
+  const names = new Set(dataset.baseCustomers.map(record => normalizeCustomerName(record?.name)).filter(Boolean))
   let maxCustomerNo = dataset.baseCustomers.reduce((max, record) => {
     const match = String(record?.code ?? '').match(/^KH(\d+)$/)
     return match ? Math.max(max, Number(match[1])) : max
   }, 0)
 
   dataset.orders.forEach((order) => {
-    const name = String(order?.customer ?? order?.customerName ?? '').trim()
+    const name = normalizeCustomerName(order?.customer ?? order?.customerName)
     if (!name || names.has(name))
       return
     maxCustomerNo += 1
