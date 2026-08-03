@@ -1,13 +1,13 @@
 import { defineEventHandler } from 'h3'
-import { syncUsersSalary } from '../../../services/system/user-salary-sync-service'
+import { approvalOaStateService } from '../../../services/approval/oa-state-service'
 import { requireAnyRole } from '../../../utils/security'
-import { systemStore } from '../../../utils/system-store'
 
 export default defineEventHandler(async (event) => {
   requireAnyRole(event, ['ADMIN', 'FINANCE_MANAGER', 'DEPT_LEADER', 'APPROVER'])
   return {
     code: 200,
     msg: '获取成功',
-    data: await syncUsersSalary(await systemStore.listUsers({}) as any[]),
+    // A module view must not create or update salary records as a side effect.
+    data: await approvalOaStateService.get(),
   }
 })
