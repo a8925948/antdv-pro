@@ -1395,7 +1395,7 @@ watch(locations, value => queueGpsChineseAddresses(value), { deep: true, immedia
 }
 
 .vehicle-item {
-  padding: 10px 8px !important;
+  padding: 6px 8px !important;
   cursor: pointer;
   border-radius: 6px;
   transition:

@@ -626,6 +626,41 @@ html.dark .ant-table-wrapper .ant-table-cell-fix-right {
   padding: 8px 10px;
 }
 
+.ant-list {
+  font-size: 13px;
+}
+
+.ant-list .ant-list-item {
+  min-width: 0;
+  padding-block: 6px;
+  line-height: 1.35;
+  border-block-end-color: var(--admin-border-subtle);
+}
+
+.ant-list .ant-list-item-meta {
+  align-items: flex-start;
+  margin-block-end: 0;
+  min-width: 0;
+}
+
+.ant-list .ant-list-item-meta-title {
+  margin-block-end: 1px;
+  line-height: 1.3;
+}
+
+.ant-list .ant-list-item-meta-description {
+  line-height: 1.35;
+}
+
+.ant-list .ant-list-item-action {
+  margin-block: 0;
+  margin-inline-start: 12px;
+}
+
+.ant-list .ant-list-item-action > li {
+  padding-inline: 6px;
+}
+
 .ant-table-wrapper .ant-table-column-sorters {
   gap: 6px;
   justify-content: inherit;
@@ -836,5 +871,17 @@ html.dark .ant-table-wrapper .ant-table-cell-fix-right {
   .ant-table-wrapper .ant-table-thead > tr > th,
   .ant-table-wrapper .ant-table-tbody > tr > td {
     padding: 8px;
+  }
+
+  .ant-list {
+    font-size: 12px;
+  }
+
+  .ant-list .ant-list-item {
+    padding-block: 5px;
+  }
+
+  .ant-list .ant-list-item-action {
+    margin-inline-start: 8px;
   }
 }

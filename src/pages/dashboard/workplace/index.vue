@@ -1158,7 +1158,7 @@ onMounted(() => {
   grid-template-columns: minmax(0, 1fr) auto;
   column-gap: 16px;
   align-items: start;
-  padding: 12px 0;
+  padding: 8px 0;
 }
 .approval-list :deep(.ant-list-item-meta),
 .approval-list :deep(.ant-list-item-meta-content) {
@@ -1488,6 +1488,7 @@ onMounted(() => {
   }
   .approval-list :deep(.ant-list-item) {
     grid-template-columns: 1fr;
+    padding-block: 6px;
   }
   .section-card :deep(.ant-card-body) {
     padding: 14px;
