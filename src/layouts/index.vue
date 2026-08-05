@@ -16,7 +16,6 @@ const layoutMenu = useLayoutMenu()
 const { t } = useI18nLocale()
 const { selectedKeys, openKeys } = storeToRefs(layoutMenu)
 const { isMobile, isPad } = useQueryBreakpoints()
-const showSettingDrawer = !import.meta.env.PROD
 watch(isPad, (val) => {
   if (val)
     appStore.toggleCollapsed(true)
@@ -75,7 +74,6 @@ const layoutProps = computed(() =>
     <RouteView v-else />
   </BasicLayout>
   <SettingDrawer
-    v-if="showSettingDrawer"
     v-model:open="layoutSetting.drawerVisible"
     :t="t"
     :theme="layoutSetting.theme"
