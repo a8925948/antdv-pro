@@ -57,6 +57,8 @@ INSERT INTO sys_menu (id, parent_id, name, title, path, component, redirect, ico
   (10, NULL, 'Transport', '运输管理', '/transport', 'RouteView', '/transport/operations', 'CarOutlined', 'transport:view', 'menu', 3, 'enabled'),
   (15, 10, 'TransportFees', '规费管理', '/transport/fees', '/transport/fees', NULL, NULL, 'transport:fees:view', 'menu', 31, 'enabled'),
   (18, 10, 'TransportVehicleLoans', '车贷费用', '/transport/vehicle-loans', '/transport/vehicle-loans', NULL, NULL, 'transport:vehicle-loans:view', 'menu', 32, 'enabled'),
+  (190, 10, 'TransportBaseData', '基础数据', '/transport/base-data', '/transport/base-data', NULL, NULL, 'transport:base-data:view', 'menu', 98, 'enabled'),
+  (191, 10, 'TransportSiteCredentials', '帐号网址', '/transport/site-credentials', '/transport/site-credentials', NULL, NULL, 'transport:site-credentials:view', 'menu', 99, 'enabled'),
   (60, NULL, 'System', '系统管理', '/system', 'RouteView', '/system/users', 'SettingOutlined', 'system:view', 'menu', 9, 'enabled'),
   (61, 60, 'SystemUsers', '用户管理', '/system/users', '/system/index', NULL, NULL, 'system:user:view', 'menu', 91, 'enabled'),
   (62, 60, 'SystemOrganization', '组织架构', '/system/organization', '/system/index', NULL, NULL, 'system:org:view', 'menu', 92, 'enabled'),

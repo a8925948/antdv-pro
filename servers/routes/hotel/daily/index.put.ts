@@ -3,13 +3,13 @@ import { hotelDailyStore } from '../../../utils/hotel-daily-store'
 import { requireAnyRole } from '../../../utils/security'
 
 export default defineEventHandler(async (event) => {
-  requireAnyRole(event, ['ADMIN', 'FINANCE_MANAGER'])
+  const user = requireAnyRole(event, ['ADMIN', 'FINANCE_MANAGER'])
   try {
     const body = await readBody(event)
     return {
       code: 200,
       msg: '保存成功',
-      data: await hotelDailyStore.save(body),
+      data: await hotelDailyStore.save(body, user.companyId, user.deptId, user.id),
     }
   }
   catch (error: any) {

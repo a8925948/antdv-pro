@@ -22,6 +22,7 @@
 | OA 组织架构 | `/oa-approval/org` | `oa_module_state.modules.org` | 组织归并到 `sys_*`，员工扩展进 `hr_employee` | P1 |
 | 办公用车 | `/oa-approval/vehicle` | 结构化表 + OA 聚合行 | `office_vehicle`, `office_vehicle_expense`, `office_vehicle_license`, `office_vehicle_insurance`, `office_vehicle_reminder`, `office_vehicle_operation_log` | P2 |
 | 运输基础资料 | `/transport/base-data` | `transport/module.vue` 页面 rows | `transport_company`, `transport_customer`, `transport_vehicle`, `transport_crew`, `transport_route`, `transport_supplier`, `transport_fee_subject` | P1 |
+| 帐号网址 | `/transport/site-credentials`（基础数据下方） | `transport_site_directory` | `transport_site_directory` | P2 |
 | 运输订单 | `/transport/orders` | `transport_operation_record.record_json` | `transport_order` | P1 |
 | 加油明细 | `/transport/fuel` | `transport_operation_record.record_json` | `transport_fuel_record` | P1 |
 | 高速通行费 | `/transport/etc` | `transport_operation_record.record_json` | `transport_etc_record` | P1 |
@@ -89,6 +90,8 @@
 ### 路线装卸车坐标识别
 
 路线基础资料的装车、卸车地址支持自动补齐经纬度，坐标字段只作为后台数据保存，不在列表、编辑弹窗和导入预览中展示。打开路线基础资料或切换到路线页时，会对缺失坐标的既有记录执行一次回填；手工编辑地址失焦后重新解析，已有路线成功解析后自动后台保存地址、坐标并同步电子围栏；路线 Excel 导入在导入预览前触发。解析优先级为历史路线坐标、已存在的圆形电子围栏坐标、高德地理编码。只有合法且精确的坐标才写入，行政区域级或服务不可用时保留旧值/空值并提示人工确认。导入和既有数据回填均按地址缓存结果，避免同一地址重复请求。
+
+路线基础档案只保留导入路线。Excel 导入的路线写入 `source: 导入路线`；运输订单产生的自动建档路线（`运输订单`、`运输订单自动建档`）不进入基础路线列表和路线选择器。兼容历史数据时，编号以 `HIS-` 开头的路线也视为运单派生数据，不展示并在数据清理时移除。已有运单仍保留自身的路线文本，不因基础档案过滤而改写历史业务记录。
 
 ## 替换 JSON store 的执行顺序
 
